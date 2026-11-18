@@ -21,15 +21,15 @@ fi
 mkdir -p "$WS"
 
 # First start in this workspace: give it a system prompt for the assistant.
-# .pi/SYSTEM.md replaces pi's coding-agent prompt for sessions in this folder. Edit it on the host.
+# .pi/va-bridge/SYSTEM.md replaces pi's coding-agent prompt for assistant sessions. Edit it on the host.
 if [ ! -d "$WS/.pi" ]; then
-  mkdir -p "$WS/.pi"
+  mkdir -p "$WS/.pi/va-bridge"
   if [ -f /opt/va-bridge/docker/SYSTEM.md ]; then
-    cp /opt/va-bridge/docker/SYSTEM.md "$WS/.pi/SYSTEM.md"
+    cp /opt/va-bridge/docker/SYSTEM.md "$WS/.pi/va-bridge/SYSTEM.md"
   else
-    cp /opt/va-bridge/docker/SYSTEM.md.example "$WS/.pi/SYSTEM.md"
+    cp /opt/va-bridge/docker/SYSTEM.md.example "$WS/.pi/va-bridge/SYSTEM.md"
   fi
-  echo "[entrypoint] created $WS/.pi/SYSTEM.md"
+  echo "[entrypoint] created $WS/.pi/va-bridge/SYSTEM.md"
 fi
 
 # Make /va-bridge available in interactive pi too (docker compose exec -u node va-bridge pi).

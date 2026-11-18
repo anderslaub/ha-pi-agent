@@ -30,10 +30,10 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
 import type { BridgeConfig } from "./config.ts";
-import { buildAssistantSection, loadAssistantPrompt } from "./prompt.ts";
+import { buildAssistantSection, loadAssistantPrompt, withToolsSection } from "./prompt.ts";
 import { SpeechFilter, toSpeech } from "./speech.ts";
 
-export const BRIDGE_VERSION = "0.2.0";
+export const BRIDGE_VERSION = "0.2.1";
 
 export interface Logger {
   info(msg: string): void;
@@ -118,10 +118,6 @@ interface Entry {
 }
 
 /** pi's own SYSTEM.md that replaces its base prompt, if any (project before global, like pi) */
-function piSystemMd(cwd: string, agentDir: string): string | undefined {
-  return [path.join(cwd, ".pi", "SYSTEM.md"), path.join(agentDir, "SYSTEM.md")].find((p) => fs.existsSync(p));
-}
-
 function toolSummary(name: string, args: Record<string, unknown> | undefined): string {
   const a = args ?? {};
   const pick = (a.command ?? a.path ?? a.file_path ?? a.query ?? a.url ?? a.pattern) as string | undefined;
@@ -184,7 +180,6 @@ export class Bridge {
       mode: this.mode,
       model: this.cfg.model ?? "pi default",
       cwd: this.cfg.cwd,
-      system_md: piSystemMd(this.cfg.cwd, getAgentDir()) ?? "pi default",
       assistant_prompt: loadAssistantPrompt(this.cfg.cwd, getAgentDir()).path ?? "built-in",
       sessions: this.entries.size,
       last_event_id: this.events.lastId,
@@ -201,11 +196,23 @@ export class Bridge {
     const agentDir = getAgentDir();
     fs.mkdirSync(cwd, { recursive: true });
     const section = buildAssistantSection(cwd, agentDir, { language: req.language, instructions: req.instructions });
-    // appendSystemPromptOverride (not appendSystemPrompt) keeps pi's own APPEND_SYSTEM.md
+    // The assistant prompt replaces pi's base prompt (and pi's own SYSTEM.md). pi then leaves out its tools
+    // list, so a hidden inline extension puts it back; it runs after your extensions and keeps their edits.
     const loader = new DefaultResourceLoader({
       cwd,
       agentDir,
-      appendSystemPromptOverride: (base) => [...base, section.text],
+      systemPromptOverride: () => section.text,
+      extensionFactories: [
+        {
+          name: "va-bridge-prompt",
+          hidden: true,
+          factory: (pi) => {
+            pi.on("before_agent_start", (event) => ({
+              systemPrompt: withToolsSection(event.systemPrompt, event.systemPromptOptions),
+            }));
+          },
+        },
+      ],
     });
     await loader.reload();
     const modelRuntime = await this.runtime();
@@ -233,7 +240,7 @@ export class Bridge {
     });
     const entry: Entry = { key, session, lastUsed: Date.now() };
     session.subscribe((event) => this.onEvent(entry, event as never));
-    this.log.info(`session ${session.sessionId} for ${key} (cwd ${cwd}, SYSTEM.md ${piSystemMd(cwd, agentDir) ?? "pi default"}, assistant prompt ${section.path ?? "built-in"})`);
+    this.log.info(`session ${session.sessionId} for ${key} (cwd ${cwd}, system prompt ${section.path ?? "built-in"})`);
     return entry;
   }
 

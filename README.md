@@ -82,7 +82,7 @@ docker compose up -d --build
   the container, so put provider keys such as `ANTHROPIC_API_KEY` there. Or log in once with
   `docker compose exec -u node va-bridge pi` and `/login`. Keys from your shell are not passed through.
 - **Working folder:** `WORKSPACE` (default `docker/workspace`) is mounted as `/workspace`. On first start, if
-  it has no `.pi` folder, the entrypoint creates `.pi/SYSTEM.md` from `docker/SYSTEM.md` (yours, git-ignored)
+  it has no `.pi` folder, the entrypoint creates `.pi/va-bridge/SYSTEM.md` from `docker/SYSTEM.md` (yours, git-ignored)
   or else `docker/SYSTEM.md.example`. Edit it on the host; new conversations pick it up.
 - **Local compose changes** (ports, extra volumes) go in `docker/compose.override.yaml` (git-ignored); docker
   compose merges it automatically.
@@ -144,19 +144,21 @@ Home Assistant then runs the pi pipeline only when that wake word is heard.
 
 ### System prompt
 
-Assistant sessions use pi's normal system prompt, so pi's own `SYSTEM.md` and `APPEND_SYSTEM.md` apply as
-usual. On top of that comes an **assistant section** (plain sentences that work spoken or as text, keep it
-short, no markdown). It is the first file of these that exists, otherwise a built-in default:
+The assistant gets its own system prompt, which **replaces** pi's default coding-agent prompt (and pi's own
+`SYSTEM.md`, which is meant for your coding sessions). It is the first of these files that exists, otherwise a
+built-in default (plain sentences that work spoken or as text, keep it short, no markdown):
 
 1. `<bridge cwd>/.pi/va-bridge/SYSTEM.md`: only sessions in that working directory
 2. `~/.pi/agent/va-bridge/SYSTEM.md`: all sessions of the bridge
 
-Because these files live in a `va-bridge/` folder, they never affect your normal pi sessions. To replace
-the whole prompt for the assistant only, put a `.pi/SYSTEM.md` in the bridge's working directory instead. That is pi's own
-mechanism: it replaces pi's coding-agent prompt. The bridge loads that folder's `.pi/` without asking about
-project trust, so only point it at folders you control. The
-assistant's language and the *Extra instructions* from the HA options are appended last. Files are re-read
-for every new session, so no restart is needed.
+`/va-bridge prompt` writes the built-in default to the second location as a starting point. Because these
+files live in a `va-bridge/` folder, they never affect your normal pi sessions.
+
+Everything pi adds around its base prompt stays: the list of available tools with their guidelines,
+`APPEND_SYSTEM.md`, `AGENTS.md` context files, skills and the working directory. The assistant's language and
+the *Extra instructions* from the HA options are appended to your prompt. The bridge loads the working
+directory's `.pi/` without asking about project trust, so only point it at folders you control. Files are
+re-read for every new session, so no restart is needed.
 
 ## Security
 

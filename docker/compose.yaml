@@ -36,7 +36,7 @@ services:
       PUID: ${PUID:-1000}
       PGID: ${PGID:-1000}
     volumes:
-      # The assistant's working folder, shared with the host. .pi/SYSTEM.md is created here on first start.
+      # The assistant's working folder, shared with the host. .pi/va-bridge/SYSTEM.md is created here on first start.
       - ${WORKSPACE:-./workspace}:/workspace
       # pi's own state: logins, settings, installed packages, session history
       - pi-agent:/home/node/.pi
