@@ -13,7 +13,8 @@ if [ "$(id -u)" = 0 ]; then
   mkdir -p "$WS" /home/node/.pi/agent
   # Docker creates a missing bind-mount folder as root: hand it over (not recursively: never touch your files)
   [ "$(stat -c %u "$WS")" = "$PUID" ] || chown "$PUID:$PGID" "$WS"
-  [ "$(stat -c %u /home/node/.pi)" = "$PUID" ] || chown -R "$PUID:$PGID" /home/node/.pi
+  # pi's state must belong to the node user, also files a "docker exec" as root may have left behind
+  find /home/node/.pi \( ! -uid "$PUID" -o ! -gid "$PGID" \) -exec chown -h "$PUID:$PGID" {} +
   exec setpriv --reuid="$PUID" --regid="$PGID" --init-groups "$0" "$@"
 fi
 
@@ -40,11 +41,44 @@ if ! grep -q '/opt/va-bridge' "$SETTINGS" 2>/dev/null; then
 fi
 
 # Extra pi packages, e.g. PI_PACKAGES="npm:pi-web-access git:github.com/user/repo"
+# npm 12 skips the install scripts (postinstall, ...) of packages it was not told to trust. The npm packages
+# in PI_PACKAGES are trusted; PI_ALLOW_SCRIPTS adds more, comma separated (e.g. dependencies that need theirs).
+pkg_name() { # npm:@scope/name@1.2 -> @scope/name
+  n="${1#npm:}"; n="${n#git:}"
+  case "${n#@}" in *@*) n="${n%@*}" ;; esac
+  printf '%s' "$n"
+}
+ALLOW="${PI_ALLOW_SCRIPTS:-}"
 for pkg in ${PI_PACKAGES:-}; do
-  name="${pkg#npm:}"; name="${name#git:}"; name="${name%@*}"
+  case "$pkg" in npm:*) ALLOW="${ALLOW:+$ALLOW,}$(pkg_name "$pkg")" ;; esac
+done
+if [ -n "$ALLOW" ]; then
+  echo "allow-scripts=$ALLOW" > "$HOME/.npmrc"
+else
+  rm -f "$HOME/.npmrc"
+fi
+
+for pkg in ${PI_PACKAGES:-}; do
+  name="$(pkg_name "$pkg")"
   if ! grep -q "$name" "$SETTINGS" 2>/dev/null; then
     echo "[entrypoint] installing pi package $pkg"
     pi install "$pkg" || echo "[entrypoint] WARNING: could not install $pkg"
+  fi
+done
+
+# Run the install scripts of trusted packages that were installed while they were blocked (once per version)
+NPM_ROOT="$HOME/.pi/agent/npm"
+for name in $(printf '%s' "$ALLOW" | tr ',' ' '); do
+  pj="$NPM_ROOT/node_modules/$name/package.json"
+  [ -f "$pj" ] || continue
+  ver="$(node -p "require('$pj').version" 2>/dev/null || echo unknown)"
+  mark="$NPM_ROOT/.scripts-ran/$(printf '%s' "$name" | tr '/' '+')@$ver"
+  [ -e "$mark" ] && continue
+  if npm rebuild "$name" --prefix "$NPM_ROOT" >/dev/null 2>&1; then
+    mkdir -p "$NPM_ROOT/.scripts-ran" && touch "$mark"
+    echo "[entrypoint] ran the install scripts of $name@$ver"
+  else
+    echo "[entrypoint] WARNING: the install scripts of $name failed (npm rebuild $name --prefix $NPM_ROOT)"
   fi
 done
 

@@ -55,7 +55,7 @@ function builtInExtensions(log: Logger): Promise<InlineExtension[]> {
   return builtins;
 }
 
-export const BRIDGE_VERSION = "0.2.1";
+export const BRIDGE_VERSION = "0.3.0";
 
 export interface Logger {
   info(msg: string): void;
@@ -258,7 +258,13 @@ export class Bridge {
   /** Fetch model lists from providers that discover them over the network (llama.cpp router, ...) */
   private async refreshModels(modelRuntime: ModelRuntime): Promise<void> {
     const r = await modelRuntime.refresh({ allowNetwork: true, force: true, signal: AbortSignal.timeout(15_000) });
-    for (const [provider, err] of r.errors) this.log.error(`model list of ${provider}: ${err.message}`);
+    // One line per distinct problem, not one per provider
+    const byMessage = new Map<string, string[]>();
+    for (const [provider, err] of r.errors) byMessage.set(err.message, [...(byMessage.get(err.message) ?? []), provider]);
+    for (const [message, providers] of byMessage) {
+      const who = providers.length > 3 ? `${providers.length} providers` : providers.join(", ");
+      this.log.error(`model list (${who}): ${message}`);
+    }
   }
 
   private async resolveModel(modelRuntime: ModelRuntime, spec: string) {

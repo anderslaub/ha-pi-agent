@@ -93,6 +93,13 @@ docker compose up -d --build
   container itself, and make sure the router listens on an address the container can reach, not only
   127.0.0.1. Pick a model with `PI_BRIDGE_MODEL=llama.cpp/<model id>`. Only models the router has loaded
   (or can autoload) are listed.
+- **Router not reachable** (`ConnectTimeoutError` to `host.docker.internal`): a timeout usually means the
+  host's firewall drops traffic from Docker networks (ufw, firewalld). Allow the router's port from them,
+  e.g. `sudo ufw allow from 172.16.0.0/12 to any port <port> proto tcp`. Or put the container on the host's
+  network and use `LLAMA_BASE_URL=http://127.0.0.1:<port>`; the bridge is then on the host's port 8787:
+  `compose.override.yaml` with `services: {va-bridge: {network_mode: host, ports: !reset [], extra_hosts: !reset []}}`. A refused
+  connection instead means the router only listens on 127.0.0.1. Test from inside the container:
+  `docker compose exec va-bridge curl -sv -m 5 http://host.docker.internal:<port>/health`.
 - **Is it up?** `curl -H "Authorization: Bearer $PI_BRIDGE_TOKEN" http://localhost:8787/v1/health`, and
   `docker compose logs -f` for what it is doing. `PI_BRIDGE_PORT` in `.env` is the port on the host.
 - **Working folder:** `WORKSPACE` (default `docker/workspace`) is mounted as `/workspace`. On first start, if
@@ -101,7 +108,9 @@ docker compose up -d --build
 - **Local compose changes** (ports, extra volumes) go in `docker/compose.override.yaml` (git-ignored); docker
   compose merges it automatically.
 - **pi's state** (logins, settings, packages, session history) is kept in the `pi-agent` volume.
-- **Packages:** `PI_PACKAGES="npm:pi-web-access …"` installs extra pi packages on first start.
+- **Packages:** `PI_PACKAGES="npm:pi-web-access …"` installs extra pi packages on first start. npm 12 skips
+  install scripts (postinstall) of packages it is not told to trust: those in `PI_PACKAGES` are trusted, and
+  `PI_ALLOW_SCRIPTS` (comma separated) adds others, such as dependencies that need a build step.
 - **Ownership:** the container runs as your host user (`PUID`/`PGID`), so files it writes are yours.
 - **Updates:** the image uses the latest pi, npm and Debian updates at build time, not pinned versions.
   Docker caches those layers, so to update run `docker compose build --pull --no-cache && docker compose up -d`.

@@ -38,6 +38,7 @@ services:
       PI_BRIDGE_BUDGET_S: ${PI_BRIDGE_BUDGET_S:-15}
       # Extra pi packages installed on first start, space separated
       PI_PACKAGES: ${PI_PACKAGES:-}
+      PI_ALLOW_SCRIPTS: ${PI_ALLOW_SCRIPTS:-}
       TZ: ${TZ:-UTC}
       # Files in the workspace are owned by this host user (id -u / id -g)
       PUID: ${PUID:-1000}
