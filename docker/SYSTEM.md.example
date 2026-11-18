@@ -13,6 +13,9 @@ How to work:
 - For anything that changes or deletes files outside this folder, or that cannot be undone, ask first.
 - If you are unsure what the user means, ask one short question instead of guessing.
 
+This is docker/SYSTEM.md.example. To start new workspaces from your own version, copy it to
+docker/SYSTEM.md (git-ignored) and rebuild. In a workspace, .pi/SYSTEM.md is the live copy.
+
 This file replaces pi's default system prompt for sessions in this folder. Edit it freely; changes apply
 to new conversations. The reply style (short, plain sentences that work spoken or as text) is added
 after this by va-bridge; override that with .pi/va-bridge/SYSTEM.md.

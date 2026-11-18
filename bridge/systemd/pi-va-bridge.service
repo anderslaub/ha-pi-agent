@@ -8,8 +8,8 @@ Description=pi va-bridge for Home Assistant
 After=network-online.target
 
 [Service]
-# Installed with `pi install git:github.com/OWNER/ha-pi-agent`:
-ExecStart=/usr/bin/env node %h/.pi/agent/git/github.com/OWNER/ha-pi-agent/bridge/src/cli.ts
+# Installed with `pi install git:github.com/anderslaub/ha-pi-agent`:
+ExecStart=/usr/bin/env node %h/.pi/agent/git/github.com/anderslaub/ha-pi-agent/bridge/src/cli.ts
 # Node from nvm etc. is usually not on systemd's PATH; set it explicitly if needed:
 # Environment=PATH=%h/.nvm/versions/node/v24.19.0/bin:/usr/bin
 Restart=on-failure

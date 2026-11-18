@@ -47,7 +47,7 @@ The repository is two things at once: a HACS integration (`custom_components/pi_
 ### 1. The bridge (a pi package, on the machine where pi is installed)
 
 ```sh
-pi install git:github.com/OWNER/ha-pi-agent
+pi install git:github.com/anderslaub/ha-pi-agent
 ```
 
 Then, in pi:
@@ -65,7 +65,7 @@ working directory (default `~/pi-va`). The bridge stops when that pi exits. If s
 autostart on, the first one serves and the others leave it alone.
 
 **Always on, without an interactive pi:** run the same bridge headless as a service:
-`node ~/.pi/agent/git/github.com/OWNER/ha-pi-agent/bridge/src/cli.ts` (Node.js 24+). For a systemd user
+`node ~/.pi/agent/git/github.com/anderslaub/ha-pi-agent/bridge/src/cli.ts` (Node.js 24+). For a systemd user
 unit, see `bridge/systemd/pi-va-bridge.service`. It uses the same settings file.
 
 ### 1b. Or: Docker
@@ -82,20 +82,26 @@ docker compose up -d --build
   the container, so put provider keys such as `ANTHROPIC_API_KEY` there. Or log in once with
   `docker compose exec -u node va-bridge pi` and `/login`. Keys from your shell are not passed through.
 - **Working folder:** `WORKSPACE` (default `docker/workspace`) is mounted as `/workspace`. On first start, if
-  it has no `.pi` folder, the entrypoint creates `.pi/SYSTEM.md` with an assistant prompt. Edit it on the
-  host; new conversations pick it up.
+  it has no `.pi` folder, the entrypoint creates `.pi/SYSTEM.md` from `docker/SYSTEM.md` (yours, git-ignored)
+  or else `docker/SYSTEM.md.example`. Edit it on the host; new conversations pick it up.
+- **Local compose changes** (ports, extra volumes) go in `docker/compose.override.yaml` (git-ignored); docker
+  compose merges it automatically.
 - **pi's state** (logins, settings, packages, session history) is kept in the `pi-agent` volume.
 - **Packages:** `PI_PACKAGES="npm:pi-web-access …"` installs extra pi packages on first start.
 - **Ownership:** the container runs as your host user (`PUID`/`PGID`), so files it writes are yours.
 
 ### 2. The integration
 
-**HACS:** add this repository as a custom repository (type *Integration*), install **Pi Agent**, and
-restart Home Assistant.
+**HACS:** [![Open in HACS](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=anderslaub&repository=ha-pi-agent&category=integration)
+
+Or by hand: HACS → ⋮ → *Custom repositories* → `https://github.com/anderslaub/ha-pi-agent`, type
+*Integration* → *Add*. Then open **Pi Agent** in HACS, *Download*, and restart Home Assistant.
 
 **Manual:** copy `custom_components/pi_agent` into `<config>/custom_components/` and restart.
 
-Then go to **Settings → Devices & services → Add integration → Pi Agent** and enter the bridge URL
+Then go to **Settings → Devices & services → Add integration → Pi Agent**
+([![Add integration](https://my.home-assistant.io/badges/config_flow_start.svg)](https://my.home-assistant.io/redirect/config_flow_start/?domain=pi_agent))
+and enter the bridge URL
 (e.g. `http://192.168.1.20:8787`) and the token.
 
 ### 3. A second wake word for pi
@@ -190,5 +196,6 @@ pi -e .                               # try the extension from this checkout, th
 PI_BRIDGE_URL=http://127.0.0.1:8787 PI_BRIDGE_TOKEN=... .venv/bin/pytest tests/test_live_bridge.py
 ```
 
-Before publishing, replace `OWNER` in `custom_components/pi_agent/manifest.json`, `package.json`,
-`bridge/systemd/pi-va-bridge.service` and this README with your GitHub account.
+Your own setup files are git-ignored, so `git pull` never conflicts with them: `docker/.env` (from
+`.env.example`), `docker/SYSTEM.md` (from `SYSTEM.md.example`), `docker/compose.override.yaml` and
+`docker/workspace/`.

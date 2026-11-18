@@ -24,7 +24,11 @@ mkdir -p "$WS"
 # .pi/SYSTEM.md replaces pi's coding-agent prompt for sessions in this folder. Edit it on the host.
 if [ ! -d "$WS/.pi" ]; then
   mkdir -p "$WS/.pi"
-  cp /opt/va-bridge/docker/SYSTEM.md "$WS/.pi/SYSTEM.md"
+  if [ -f /opt/va-bridge/docker/SYSTEM.md ]; then
+    cp /opt/va-bridge/docker/SYSTEM.md "$WS/.pi/SYSTEM.md"
+  else
+    cp /opt/va-bridge/docker/SYSTEM.md.example "$WS/.pi/SYSTEM.md"
+  fi
   echo "[entrypoint] created $WS/.pi/SYSTEM.md"
 fi
 

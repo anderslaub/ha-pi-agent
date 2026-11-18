@@ -19,7 +19,8 @@ COPY bridge/src /opt/va-bridge/bridge/src
 RUN mkdir -p /opt/va-bridge/node_modules/@earendil-works \
  && ln -s "$(npm root -g)/@earendil-works/pi-coding-agent" /opt/va-bridge/node_modules/@earendil-works/pi-coding-agent
 COPY docker/entrypoint.sh /usr/local/bin/va-bridge-entrypoint
-COPY docker/SYSTEM.md /opt/va-bridge/docker/SYSTEM.md
+# The default prompt for new workspaces: docker/SYSTEM.md if you made one (git-ignored), else the example
+COPY docker/SYSTEM.md* /opt/va-bridge/docker/
 
 # The entrypoint starts as root only to fix folder ownership, then runs everything as the "node" user with
 # uid/gid PUID/PGID (default 1000), so files in the workspace belong to your host user.

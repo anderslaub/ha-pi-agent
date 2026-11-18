@@ -1,6 +1,8 @@
 # pi as the brain of Home Assistant assistants.
 #   cd docker && cp .env.example .env    # set PI_BRIDGE_TOKEN and a model provider key
 #   docker compose up -d --build
+# Local changes (ports, extra volumes, ...) go in compose.override.yaml (git-ignored), which docker compose
+# merges automatically, so this file can stay as it is.
 # Then add the "Pi Agent" integration in Home Assistant: http://<this host>:8787 and the same token.
 services:
   va-bridge:

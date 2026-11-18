@@ -4,5 +4,8 @@ __pycache__/
 .pytest_cache/
 node_modules/
 bridge.env
+# Your own setup files (the *.example / tracked versions stay untouched)
 docker/.env
+docker/SYSTEM.md
+docker/compose.override.yaml
 docker/workspace/
