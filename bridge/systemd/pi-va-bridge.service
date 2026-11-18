@@ -1,0 +1,19 @@
+# Headless va-bridge as a systemd user service (instead of /va-bridge start inside pi).
+# Settings come from ~/.pi/agent/va-bridge.json (run /va-bridge setup in pi once).
+#   cp pi-va-bridge.service ~/.config/systemd/user/   # adjust ExecStart to where the package lives
+#   systemctl --user enable --now pi-va-bridge
+#   loginctl enable-linger $USER                         # keep it running when logged out
+[Unit]
+Description=pi va-bridge for Home Assistant
+After=network-online.target
+
+[Service]
+# Installed with `pi install git:github.com/OWNER/ha-pi-agent`:
+ExecStart=/usr/bin/env node %h/.pi/agent/git/github.com/OWNER/ha-pi-agent/bridge/src/cli.ts
+# Node from nvm etc. is usually not on systemd's PATH; set it explicitly if needed:
+# Environment=PATH=%h/.nvm/versions/node/v24.19.0/bin:/usr/bin
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

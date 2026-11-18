@@ -1,0 +1,9 @@
+**/node_modules
+.venv
+.git
+.github
+.pytest_cache
+custom_components
+tests
+docker/workspace
+docker/.env

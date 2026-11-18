@@ -1,0 +1,24 @@
+{
+  "name": "pi-va-bridge",
+  "version": "0.2.0",
+  "description": "Use pi as the brain of Home Assistant assistants: the bridge for the 'Pi Agent' Home Assistant integration",
+  "keywords": ["pi-package", "home-assistant", "assist", "voice-assistant"],
+  "type": "module",
+  "license": "MIT",
+  "repository": { "type": "git", "url": "https://github.com/OWNER/ha-pi-agent" },
+  "engines": { "node": ">=24" },
+  "files": ["bridge/src", "bridge/systemd", "README.md", "LICENSE"],
+  "pi": {
+    "extensions": ["./bridge/src/extension.ts"]
+  },
+  "scripts": {
+    "bridge": "node bridge/src/cli.ts",
+    "test": "node --test \"bridge/test/*.test.ts\""
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "^0.85.1"
+  }
+}

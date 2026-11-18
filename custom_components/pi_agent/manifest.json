@@ -1,0 +1,14 @@
+{
+  "domain": "pi_agent",
+  "name": "Pi Agent",
+  "after_dependencies": ["assist_satellite"],
+  "codeowners": [],
+  "config_flow": true,
+  "dependencies": ["conversation"],
+  "documentation": "https://github.com/OWNER/ha-pi-agent",
+  "integration_type": "service",
+  "iot_class": "local_push",
+  "issue_tracker": "https://github.com/OWNER/ha-pi-agent/issues",
+  "requirements": [],
+  "version": "0.1.0"
+}

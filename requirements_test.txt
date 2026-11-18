@@ -1,0 +1,4 @@
+hassil==3.12.1
+home-assistant-intents==2026.10.6
+gazetteer-matcher==1.1.0
+pytest-homeassistant-custom-component

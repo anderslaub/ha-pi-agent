@@ -1,0 +1,64 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Connect to pi (va-bridge)",
+        "description": "In pi on the machine where it lives, run /va-bridge setup and /va-bridge start, then enter the address and token it shows.",
+        "data": {
+          "name": "Name",
+          "url": "Bridge URL",
+          "api_token": "Bridge token"
+        },
+        "data_description": {
+          "url": "For example http://192.168.1.20:8787",
+          "api_token": "The PI_BRIDGE_TOKEN the bridge was started with"
+        }
+      },
+      "reauth_confirm": {
+        "title": "New bridge token",
+        "description": "The pi bridge at {url} rejected the token.",
+        "data": { "api_token": "Bridge token" }
+      }
+    },
+    "error": {
+      "cannot_connect": "Cannot reach the pi bridge",
+      "invalid_auth": "The bridge rejected the token",
+      "unknown": "Unexpected error"
+    },
+    "abort": {
+      "already_configured": "This bridge is already configured",
+      "reauth_successful": "The token was updated"
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Assistant behaviour",
+        "data": {
+          "prompt": "Extra instructions",
+          "reply_budget": "Reply budget",
+          "session_mode": "Conversation memory",
+          "reset_hours": "Start a fresh session after",
+          "announce": "Announce results of long tasks",
+          "detach_message": "Message when a task continues in the background",
+          "busy_message": "Message when pi is still busy",
+          "workspace": "Working directory on the pi host"
+        },
+        "data_description": {
+          "prompt": "Added to pi's system prompt (templates allowed). pi's own AGENTS.md, skills and extensions are always used.",
+          "reply_budget": "If pi is still working after this long, it says the background message and announces the answer on the same voice device when done.",
+          "reset_hours": "Only for one session per device: how long it must be quiet before pi starts a new session.",
+          "workspace": "Leave empty to use the bridge's PI_BRIDGE_CWD."
+        }
+      }
+    }
+  },
+  "selector": {
+    "session_mode": {
+      "options": {
+        "per_conversation": "New pi session for every conversation",
+        "per_device": "One ongoing pi session per device"
+      }
+    }
+  }
+}

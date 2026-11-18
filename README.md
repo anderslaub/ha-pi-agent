@@ -1,0 +1,194 @@
+# Pi Agent for Home Assistant
+
+Use [pi](https://pi.dev), the coding agent harness, as a Home Assistant **conversation agent**. Pi runs on
+your own machine with your own setup: model, `AGENTS.md`, skills, extensions and packages (web search,
+memory, sub-agents and so on). You can talk to it from any Assist voice satellite or from the Assist chat.
+
+It's meant for a second voice pipeline next to Home Assistant's own intent pipeline. Quick commands
+("turn off the kitchen light") go to HA's intents. Long conversations, research, knowledge questions and
+coding tasks go to pi.
+
+```
+ voice satellite ──► HA Assist pipeline ──► Pi Agent (conversation entity)
+                                                │  HTTP, streaming NDJSON
+                                                ▼
+                     va-bridge: a pi extension (/va-bridge) or a headless service ──► pi sessions
+```
+
+The repository is two things at once: a HACS integration (`custom_components/pi_agent`) and a pi package
+(va-bridge, in `bridge/`). Pi is the assistant's brain; the voice, if any, is HA's STT and TTS.
+
+## Features
+
+- **Real pi sessions.** Each conversation is a normal pi session saved to disk, so you can resume it at
+  the keyboard with `pi -r`.
+- **Streaming.** Spoken text streams into Home Assistant as it's generated, so streaming TTS starts
+  talking right away. Tool use shows up as "thinking" in the Assist debug view and isn't spoken.
+- **Speech-friendly.** Pi is told it's speaking. Markdown, code blocks, tables and URLs are stripped
+  before the text reaches TTS.
+- **Long tasks run in the background.** If pi is still working after the *reply budget*
+  (default 15 s):
+  1. The satellite says "I'm on it. I'll let you know when it's done."
+  2. Pi keeps working.
+  3. The final answer is **announced on the same satellite** when it's ready. With no satellite, it
+     becomes a persistent notification.
+  4. A `pi_agent_task_finished` event fires for automations.
+- **Follow-up questions keep the mic open.** A reply ending in "?" continues the conversation, like
+  other LLM agents.
+- **Conversation memory, your choice:**
+  - a new pi session for each conversation, or
+  - one ongoing session per device that resets after a quiet period ("what did we talk about
+    this morning?").
+- **Busy handling.** Talk to it while a background task is running and your request is queued as a
+  follow-up.
+
+## Install
+
+### 1. The bridge (a pi package, on the machine where pi is installed)
+
+```sh
+pi install git:github.com/OWNER/ha-pi-agent
+```
+
+Then, in pi:
+
+```
+/va-bridge setup          creates ~/.pi/agent/va-bridge.json with a token and shows what to enter in HA
+/va-bridge start          starts the bridge inside this pi (the footer shows "va-bridge :8787")
+/va-bridge autostart on   start it whenever an interactive pi starts
+/va-bridge prompt         write the system prompt to ~/.pi/agent/va-bridge/SYSTEM.md for editing
+/va-bridge                status: URL, working directory, model, sessions, prompt file
+```
+
+Assistant sessions run in that pi process next to your own session, as separate pi sessions in their own
+working directory (default `~/pi-va`). The bridge stops when that pi exits. If several pi instances have
+autostart on, the first one serves and the others leave it alone.
+
+**Always on, without an interactive pi:** run the same bridge headless as a service:
+`node ~/.pi/agent/git/github.com/OWNER/ha-pi-agent/bridge/src/cli.ts` (Node.js 24+). For a systemd user
+unit, see `bridge/systemd/pi-va-bridge.service`. It uses the same settings file.
+
+### 1b. Or: Docker
+
+`docker/` has a Dockerfile, which installs pi and the va-bridge package, and a `compose.yaml`:
+
+```sh
+cd docker
+cp .env.example .env      # PI_BRIDGE_TOKEN, model, provider key, PUID/PGID, WORKSPACE
+docker compose up -d --build
+```
+
+- **Settings** come from environment variables (`PI_BRIDGE_*`, see below). Everything in `.env` is passed to
+  the container, so put provider keys such as `ANTHROPIC_API_KEY` there. Or log in once with
+  `docker compose exec -u node va-bridge pi` and `/login`. Keys from your shell are not passed through.
+- **Working folder:** `WORKSPACE` (default `docker/workspace`) is mounted as `/workspace`. On first start, if
+  it has no `.pi` folder, the entrypoint creates `.pi/SYSTEM.md` with an assistant prompt. Edit it on the
+  host; new conversations pick it up.
+- **pi's state** (logins, settings, packages, session history) is kept in the `pi-agent` volume.
+- **Packages:** `PI_PACKAGES="npm:pi-web-access …"` installs extra pi packages on first start.
+- **Ownership:** the container runs as your host user (`PUID`/`PGID`), so files it writes are yours.
+
+### 2. The integration
+
+**HACS:** add this repository as a custom repository (type *Integration*), install **Pi Agent**, and
+restart Home Assistant.
+
+**Manual:** copy `custom_components/pi_agent` into `<config>/custom_components/` and restart.
+
+Then go to **Settings → Devices & services → Add integration → Pi Agent** and enter the bridge URL
+(e.g. `http://192.168.1.20:8787`) and the token.
+
+### 3. A second wake word for pi
+
+1. Create an assistant under **Settings → Voice assistants** that uses **Pi Agent** as the
+   conversation agent.
+2. Voice satellites that support two wake words show **Wake word 2** and **Assistant 2** settings.
+   Examples are ESPHome devices with two non-internal microWakeWord models, such as Voice PE.
+3. Point wake word 2 at, say, "Okay Nabu", and assistant 2 at the pi assistant.
+
+Home Assistant then runs the pi pipeline only when that wake word is heard.
+
+## Options
+
+| Option | Default | |
+|---|---|---|
+| Extra instructions | – | Added to pi's system prompt; templates allowed |
+| Reply budget | 15 s | After this long, the task continues in the background |
+| Conversation memory | per conversation | Or one ongoing session per device |
+| Start a fresh session after | 4 h | Per-device mode only |
+| Announce results of long tasks | on | Off = only the event and notification |
+| Background / busy messages | English | Change them if your assistant speaks another language |
+| Working directory | bridge default | Where pi starts (its project `AGENTS.md`, `.pi/` apply) |
+
+### Bridge settings
+
+`~/.pi/agent/va-bridge.json`, or the `PI_BRIDGE_*` environment variable (which wins):
+
+| Key | Variable | Default | |
+|---|---|---|---|
+| `token` | `PI_BRIDGE_TOKEN` | made by `/va-bridge setup` | Shared secret (≥ 16 chars) |
+| `host` / `port` | `PI_BRIDGE_HOST` / `PI_BRIDGE_PORT` | `0.0.0.0` / `8787` | Where to listen |
+| `cwd` | `PI_BRIDGE_CWD` | `~/pi-va` | Working directory of assistant sessions |
+| `model` | `PI_BRIDGE_MODEL` | pi default | e.g. `anthropic/claude-sonnet-5-5:low`; a fast model suits voice use |
+| `thinking` | `PI_BRIDGE_THINKING` | pi default | `off`/`minimal`/`low`/… ; lower = faster replies |
+| `tools` | `PI_BRIDGE_TOOLS` | pi default | List (or comma string) to restrict tools |
+| `idleMinutes` | `PI_BRIDGE_IDLE_MINUTES` | 120 | Unload idle sessions from memory |
+| `budgetSeconds` | `PI_BRIDGE_BUDGET_S` | 15 | Reply budget when HA sends none |
+| `autostart` | `PI_BRIDGE_AUTOSTART` | false | Start with interactive pi |
+
+### System prompt
+
+Assistant sessions use pi's normal system prompt, so pi's own `SYSTEM.md` and `APPEND_SYSTEM.md` apply as
+usual. On top of that comes an **assistant section** (plain sentences that work spoken or as text, keep it
+short, no markdown). It is the first file of these that exists, otherwise a built-in default:
+
+1. `<bridge cwd>/.pi/va-bridge/SYSTEM.md`: only sessions in that working directory
+2. `~/.pi/agent/va-bridge/SYSTEM.md`: all sessions of the bridge
+
+Because these files live in a `va-bridge/` folder, they never affect your normal pi sessions. To replace
+the whole prompt for the assistant only, put a `.pi/SYSTEM.md` in the bridge's working directory instead. That is pi's own
+mechanism: it replaces pi's coding-agent prompt. The bridge loads that folder's `.pi/` without asking about
+project trust, so only point it at folders you control. The
+assistant's language and the *Extra instructions* from the HA options are appended last. Files are re-read
+for every new session, so no restart is needed.
+
+## Security
+
+**Anyone who can talk to your voice satellites can make pi run commands on the bridge host**, because
+pi's default tools include `bash`, `edit` and `write`. Before you connect it:
+
+- **Contain it:** run the bridge as a dedicated user or in a container (see pi's `containerization.md`).
+- **Limit the tools** with `PI_BRIDGE_TOOLS` (e.g. `read,grep,find,ls` plus your web search tool), or
+  limit what they can reach with a project `.pi/` config.
+- **Protect the token:** keep it long and random, and the bridge on your LAN. The HTTP API isn't
+  encrypted, so put it behind a TLS reverse proxy if it crosses untrusted networks.
+
+## Bridge API
+
+All requests need `Authorization: Bearer <token>`.
+
+- `GET /v1/health` returns `{ok, bridge_version, pi_version, model, cwd, sessions, last_event_id}`.
+- `POST /v1/turn` takes `{text, session_key, language, conversation_id, device_id, satellite_id,
+  instructions, budget_s, reset_after_s, cwd, detach_message, busy_message}`. It streams NDJSON lines:
+  - `{"t":"text","d":…}`: speech-ready text
+  - `{"t":"activity","d":"bash: ls"}`
+  - `{"t":"detached","task_id":…,"d":…}`
+  - `{"t":"error","message":…}`
+  - `{"t":"done"}`
+- `POST /v1/abort` takes `{session_key}`.
+- `GET /v1/events?since=<id>` streams NDJSON `task_done` / `task_failed` events (with
+  `satellite_id`, `text`, `error`) and pings every 15 s.
+
+## Development
+
+```sh
+uv venv && uv pip install -r requirements_test.txt
+.venv/bin/pytest                      # integration tests (fake bridge over real HTTP)
+npm install && npm test               # bridge tests (speech filter, settings, prompt files)
+pi -e .                               # try the extension from this checkout, then /va-bridge start
+# end-to-end against a running bridge + pi:
+PI_BRIDGE_URL=http://127.0.0.1:8787 PI_BRIDGE_TOKEN=... .venv/bin/pytest tests/test_live_bridge.py
+```
+
+Before publishing, replace `OWNER` in `custom_components/pi_agent/manifest.json`, `package.json`,
+`bridge/systemd/pi-va-bridge.service` and this README with your GitHub account.

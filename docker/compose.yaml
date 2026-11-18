@@ -1,0 +1,43 @@
+# pi as the brain of Home Assistant assistants.
+#   cd docker && cp .env.example .env    # set PI_BRIDGE_TOKEN and a model provider key
+#   docker compose up -d --build
+# Then add the "Pi Agent" integration in Home Assistant: http://<this host>:8787 and the same token.
+services:
+  va-bridge:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+      args:
+        PI_VERSION: ${PI_VERSION:-0.85.1}
+    image: pi-va-bridge
+    container_name: pi-va-bridge
+    restart: unless-stopped
+    ports:
+      - "${PI_BRIDGE_PORT:-8787}:8787"
+    # Everything in .env reaches the container, including provider credentials such as ANTHROPIC_API_KEY.
+    # (Keys from your shell are deliberately not passed through.)
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      # Bridge (see README "Bridge settings")
+      PI_BRIDGE_TOKEN: ${PI_BRIDGE_TOKEN:?set PI_BRIDGE_TOKEN in .env}
+      PI_BRIDGE_MODEL: ${PI_BRIDGE_MODEL:-}
+      PI_BRIDGE_THINKING: ${PI_BRIDGE_THINKING:-}
+      PI_BRIDGE_TOOLS: ${PI_BRIDGE_TOOLS:-}
+      PI_BRIDGE_IDLE_MINUTES: ${PI_BRIDGE_IDLE_MINUTES:-120}
+      PI_BRIDGE_BUDGET_S: ${PI_BRIDGE_BUDGET_S:-15}
+      # Extra pi packages installed on first start, space separated
+      PI_PACKAGES: ${PI_PACKAGES:-}
+      TZ: ${TZ:-UTC}
+      # Files in the workspace are owned by this host user (id -u / id -g)
+      PUID: ${PUID:-1000}
+      PGID: ${PGID:-1000}
+    volumes:
+      # The assistant's working folder, shared with the host. .pi/SYSTEM.md is created here on first start.
+      - ${WORKSPACE:-./workspace}:/workspace
+      # pi's own state: logins, settings, installed packages, session history
+      - pi-agent:/home/node/.pi
+
+volumes:
+  pi-agent:
