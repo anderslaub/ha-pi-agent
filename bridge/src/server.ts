@@ -31,6 +31,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import type { AgentSession, InlineExtension } from "@earendil-works/pi-coding-agent";
 import type { BridgeConfig } from "./config.ts";
+import { ensureRouterModel, llamaRouter } from "./llama.ts";
 import { buildAssistantSection, loadAssistantPrompt, withToolsSection } from "./prompt.ts";
 import { SpeechFilter, toSpeech } from "./speech.ts";
 
@@ -262,13 +263,29 @@ export class Bridge {
 
   private async resolveModel(modelRuntime: ModelRuntime, spec: string) {
     let r = resolveCliModel({ cliModel: spec, modelRuntime });
-    if (!r.model) {
-      // A model loaded on a router since the last refresh, for example
-      await this.refreshModels(modelRuntime);
-      r = resolveCliModel({ cliModel: spec, modelRuntime });
+    // A llama.cpp router lists only loaded models, and pi's list may be stale: make sure the router has the
+    // model loaded (one quick request per new session; throws when the router does not have it)
+    const router = llamaRouter();
+    if (router && (!r.model || r.model.provider === "llama.cpp")) {
+      const done = await ensureRouterModel(router, spec);
+      if (done) this.log.info(done);
+      else if (r.model && !r.warning) return r;
+    } else if (r.model) {
+      // pi accepts an unknown "provider/id" as a custom id, with a warning
+      if (r.warning) this.log.info(r.warning);
+      return r;
     }
-    if (!r.model) throw new Error(r.error ?? `model ${spec} not found`);
-    return r;
+    // ... or it was loaded since the last refresh
+    await this.refreshModels(modelRuntime);
+    r = resolveCliModel({ cliModel: spec, modelRuntime });
+    if (r.model) return r;
+    const available = (await modelRuntime.getAvailable()).map((m) => `${m.provider}/${m.id}`);
+    throw new Error(
+      `model "${spec}" not found. ` +
+        (available.length
+          ? `Available: ${available.slice(0, 15).join(", ")}${available.length > 15 ? ", ..." : ""}`
+          : "pi has no usable models: check the provider login / API key (and LLAMA_BASE_URL)."),
+    );
   }
 
   private async create(key: string, req: TurnRequest): Promise<Entry> {
