@@ -25,6 +25,8 @@ COPY bridge/src /opt/va-bridge/bridge/src
 RUN mkdir -p /opt/va-bridge/node_modules/@earendil-works \
  && ln -s "$(npm root -g)/@earendil-works/pi-coding-agent" /opt/va-bridge/node_modules/@earendil-works/pi-coding-agent
 COPY docker/entrypoint.sh /usr/local/bin/va-bridge-entrypoint
+# "docker exec -it <container> pi" runs pi as the node user (root would leave root-owned files in ~/.pi)
+COPY docker/pi-as-node.sh /usr/local/sbin/pi
 # The default prompt for new workspaces: docker/SYSTEM.md if you made one (git-ignored), else the example
 COPY docker/SYSTEM.md* /opt/va-bridge/docker/
 

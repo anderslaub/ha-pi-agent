@@ -32,7 +32,7 @@ if [ ! -d "$WS/.pi" ]; then
   echo "[entrypoint] created $WS/.pi/va-bridge/SYSTEM.md"
 fi
 
-# Make /va-bridge available in interactive pi too (docker compose exec -u node va-bridge pi).
+# Make /va-bridge available in interactive pi too (docker compose exec va-bridge pi).
 # The settings live in the volume, so only do this once.
 SETTINGS="$HOME/.pi/agent/settings.json"
 if ! grep -q '/opt/va-bridge' "$SETTINGS" 2>/dev/null; then

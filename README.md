@@ -79,8 +79,22 @@ docker compose up -d --build
 ```
 
 - **Settings** come from environment variables (`PI_BRIDGE_*`, see below). Everything in `.env` is passed to
-  the container, so put provider keys such as `ANTHROPIC_API_KEY` there. Or log in once with
-  `docker compose exec -u node va-bridge pi` and `/login`. Keys from your shell are not passed through.
+  the container, so put provider keys such as `ANTHROPIC_API_KEY` there. Keys from your shell are not passed
+  through. Changes to `.env` apply with `docker compose up -d` (a restart does not re-read it).
+- **pi inside the container:** `docker compose exec va-bridge pi` (or `docker exec -it pi-va-bridge pi`; the
+  `-it` is needed for the interactive UI). It always runs as the container's user. Use it to `/login` to a
+  provider, and `/model` to pick the default model; both are kept in the `pi-agent` volume. A shell:
+  `docker compose exec -u node va-bridge bash`.
+- **Model:** `PI_BRIDGE_MODEL` in `.env` (e.g. `anthropic/claude-sonnet-5-5`; list them with
+  `docker compose exec va-bridge pi --list-models`), else the default picked with `/model`. The log and
+  `/v1/health` show which model is used, and warn when pi has no usable model yet.
+- **Local llama.cpp** (router mode): set `LLAMA_BASE_URL` (and `LLAMA_API_KEY` if the router has one) in
+  `.env`. For a router on the Docker host use `http://host.docker.internal:<port>`, since `localhost` is the
+  container itself, and make sure the router listens on an address the container can reach, not only
+  127.0.0.1. Pick a model with `PI_BRIDGE_MODEL=llama.cpp/<model id>`. Only models the router has loaded
+  (or can autoload) are listed.
+- **Is it up?** `curl -H "Authorization: Bearer $PI_BRIDGE_TOKEN" http://localhost:8787/v1/health`, and
+  `docker compose logs -f` for what it is doing. `PI_BRIDGE_PORT` in `.env` is the port on the host.
 - **Working folder:** `WORKSPACE` (default `docker/workspace`) is mounted as `/workspace`. On first start, if
   it has no `.pi` folder, the entrypoint creates `.pi/va-bridge/SYSTEM.md` from `docker/SYSTEM.md` (yours, git-ignored)
   or else `docker/SYSTEM.md.example`. Edit it on the host; new conversations pick it up.
@@ -138,7 +152,7 @@ Home Assistant then runs the pi pipeline only when that wake word is heard.
 | `token` | `PI_BRIDGE_TOKEN` | made by `/va-bridge setup` | Shared secret (≥ 16 chars) |
 | `host` / `port` | `PI_BRIDGE_HOST` / `PI_BRIDGE_PORT` | `0.0.0.0` / `8787` | Where to listen |
 | `cwd` | `PI_BRIDGE_CWD` | `~/pi-va` | Working directory of assistant sessions |
-| `model` | `PI_BRIDGE_MODEL` | pi default | e.g. `anthropic/claude-sonnet-5-5:low`; a fast model suits voice use |
+| `model` | `PI_BRIDGE_MODEL` | pi default | e.g. `anthropic/claude-sonnet-5-5:low` or `llama.cpp/<model id>`; a fast model suits voice use |
 | `thinking` | `PI_BRIDGE_THINKING` | pi default | `off`/`minimal`/`low`/… ; lower = faster replies |
 | `tools` | `PI_BRIDGE_TOOLS` | pi default | List (or comma string) to restrict tools |
 | `idleMinutes` | `PI_BRIDGE_IDLE_MINUTES` | 120 | Unload idle sessions from memory |
@@ -178,7 +192,7 @@ pi's default tools include `bash`, `edit` and `write`. Before you connect it:
 
 All requests need `Authorization: Bearer <token>`.
 
-- `GET /v1/health` returns `{ok, bridge_version, pi_version, model, cwd, sessions, last_event_id}`.
+- `GET /v1/health` returns `{ok, bridge_version, pi_version, mode, model, models_available, warning?, cwd, assistant_prompt, sessions, last_event_id}`.
 - `POST /v1/turn` takes `{text, session_key, language, conversation_id, device_id, satellite_id,
   instructions, budget_s, reset_after_s, cwd, detach_message, busy_message}`. It streams NDJSON lines:
   - `{"t":"text","d":…}`: speech-ready text

@@ -1,6 +1,7 @@
 # pi as the brain of Home Assistant assistants.
 #   cd docker && cp .env.example .env    # set PI_BRIDGE_TOKEN and a model provider key
 #   docker compose up -d --build
+#   docker compose exec va-bridge pi       # pi inside the container: /login, /model, /va-bridge
 # Local changes (ports, extra volumes, ...) go in compose.override.yaml (git-ignored), which docker compose
 # merges automatically, so this file can stay as it is.
 # Then add the "Pi Agent" integration in Home Assistant: http://<this host>:8787 and the same token.
@@ -16,12 +17,18 @@ services:
     restart: unless-stopped
     ports:
       - "${PI_BRIDGE_PORT:-8787}:8787"
+    # Lets the container reach services on the Docker host, e.g. LLAMA_BASE_URL=http://host.docker.internal:8080
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     # Everything in .env reaches the container, including provider credentials such as ANTHROPIC_API_KEY.
     # (Keys from your shell are deliberately not passed through.)
     env_file:
       - path: .env
         required: false
     environment:
+      # Inside the container the bridge always listens on 0.0.0.0:8787; PI_BRIDGE_PORT in .env is the host port.
+      PI_BRIDGE_HOST: 0.0.0.0
+      PI_BRIDGE_PORT: 8787
       # Bridge (see README "Bridge settings")
       PI_BRIDGE_TOKEN: ${PI_BRIDGE_TOKEN:?set PI_BRIDGE_TOKEN in .env}
       PI_BRIDGE_MODEL: ${PI_BRIDGE_MODEL:-}

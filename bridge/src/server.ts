@@ -20,18 +20,39 @@ import os from "node:os";
 import path from "node:path";
 import { randomUUID, timingSafeEqual } from "node:crypto";
 import {
-  createAgentSession,
-  DefaultResourceLoader,
+  createAgentSessionFromServices,
+  createAgentSessionServices,
   getAgentDir,
   ModelRuntime,
   resolveCliModel,
   SessionManager,
+  SettingsManager,
   VERSION as PI_VERSION,
 } from "@earendil-works/pi-coding-agent";
-import type { AgentSession } from "@earendil-works/pi-coding-agent";
+import type { AgentSession, InlineExtension } from "@earendil-works/pi-coding-agent";
 import type { BridgeConfig } from "./config.ts";
 import { buildAssistantSection, loadAssistantPrompt, withToolsSection } from "./prompt.ts";
 import { SpeechFilter, toSpeech } from "./speech.ts";
+
+/**
+ * pi's built-in extensions (llama.cpp provider, mcp, tool-search, ...). The pi CLI loads them into every
+ * session, but the SDK does not export them, so load them from pi's own files. Settings that disable a
+ * built-in ("-builtin:llama.cpp") still apply. Empty if a pi version moves them.
+ */
+let builtins: Promise<InlineExtension[]> | undefined;
+function builtInExtensions(log: Logger): Promise<InlineExtension[]> {
+  builtins ??= (async () => {
+    try {
+      const url = new URL("./extensions/index.js", import.meta.resolve("@earendil-works/pi-coding-agent"));
+      const mod = (await import(url.href)) as { builtInExtensions?: InlineExtension[] };
+      return mod.builtInExtensions ?? [];
+    } catch (err) {
+      log.error("could not load pi's built-in extensions (llama.cpp provider, mcp, ...)", err);
+      return [];
+    }
+  })();
+  return builtins;
+}
 
 export const BRIDGE_VERSION = "0.2.1";
 
@@ -137,6 +158,7 @@ export class Bridge {
   readonly events = new EventLog();
   private entries = new Map<string, Promise<Entry>>();
   private modelRuntime?: ModelRuntime;
+  private runtimeReady?: Promise<ModelRuntime>;
   private cfg: BridgeConfig;
   private log: Logger;
   private reaper: NodeJS.Timeout;
@@ -178,7 +200,7 @@ export class Bridge {
       bridge_version: BRIDGE_VERSION,
       pi_version: PI_VERSION,
       mode: this.mode,
-      model: this.cfg.model ?? "pi default",
+      ...(await this.modelInfo()),
       cwd: this.cfg.cwd,
       assistant_prompt: loadAssistantPrompt(this.cfg.cwd, getAgentDir()).path ?? "built-in",
       sessions: this.entries.size,
@@ -186,9 +208,67 @@ export class Bridge {
     };
   }
 
+  /** Which model new sessions get, and whether pi has any usable model (logged in / API key) at all */
+  private async modelInfo(): Promise<Record<string, unknown>> {
+    let model = this.cfg.model;
+    if (!model) {
+      try {
+        const s = SettingsManager.create(this.cfg.cwd, getAgentDir());
+        const [provider, id] = [s.getDefaultProvider(), s.getDefaultModel()];
+        model = provider && id ? `${provider}/${id} (pi default)` : "pi default";
+      } catch {
+        model = "pi default";
+      }
+    }
+    try {
+      const available = (await (await this.runtime()).getAvailable()).length;
+      return available
+        ? { model, models_available: available }
+        : { model, models_available: 0, warning: "no models available: log in to a provider in pi (/login) or set an API key" };
+    } catch {
+      return { model };
+    }
+  }
+
   private async runtime(): Promise<ModelRuntime> {
-    this.modelRuntime ??= await ModelRuntime.create();
-    return this.modelRuntime;
+    this.runtimeReady ??= (async () => {
+      const modelRuntime = await ModelRuntime.create();
+      // Providers that come from extensions (such as pi's built-in llama.cpp, configured with LLAMA_BASE_URL /
+      // LLAMA_API_KEY) are registered when extensions load: load them once here so health and model
+      // resolution know them before the first session.
+      try {
+        const services = await createAgentSessionServices({
+          cwd: this.cfg.cwd,
+          agentDir: getAgentDir(),
+          modelRuntime,
+          resourceLoaderOptions: { extensionFactories: await builtInExtensions(this.log) },
+        });
+        for (const d of services.diagnostics) if (d.type === "error") this.log.error(d.message);
+        await this.refreshModels(modelRuntime);
+      } catch (err) {
+        this.log.error("loading model providers failed", err);
+      }
+      this.modelRuntime = modelRuntime;
+      return modelRuntime;
+    })();
+    return this.runtimeReady;
+  }
+
+  /** Fetch model lists from providers that discover them over the network (llama.cpp router, ...) */
+  private async refreshModels(modelRuntime: ModelRuntime): Promise<void> {
+    const r = await modelRuntime.refresh({ allowNetwork: true, force: true, signal: AbortSignal.timeout(15_000) });
+    for (const [provider, err] of r.errors) this.log.error(`model list of ${provider}: ${err.message}`);
+  }
+
+  private async resolveModel(modelRuntime: ModelRuntime, spec: string) {
+    let r = resolveCliModel({ cliModel: spec, modelRuntime });
+    if (!r.model) {
+      // A model loaded on a router since the last refresh, for example
+      await this.refreshModels(modelRuntime);
+      r = resolveCliModel({ cliModel: spec, modelRuntime });
+    }
+    if (!r.model) throw new Error(r.error ?? `model ${spec} not found`);
+    return r;
   }
 
   private async create(key: string, req: TurnRequest): Promise<Entry> {
@@ -198,37 +278,37 @@ export class Bridge {
     const section = buildAssistantSection(cwd, agentDir, { language: req.language, instructions: req.instructions });
     // The assistant prompt replaces pi's base prompt (and pi's own SYSTEM.md). pi then leaves out its tools
     // list, so a hidden inline extension puts it back; it runs after your extensions and keeps their edits.
-    const loader = new DefaultResourceLoader({
-      cwd,
-      agentDir,
-      systemPromptOverride: () => section.text,
-      extensionFactories: [
-        {
-          name: "va-bridge-prompt",
-          hidden: true,
-          factory: (pi) => {
-            pi.on("before_agent_start", (event) => ({
-              systemPrompt: withToolsSection(event.systemPrompt, event.systemPromptOptions),
-            }));
-          },
-        },
-      ],
-    });
-    await loader.reload();
     const modelRuntime = await this.runtime();
-    let model;
-    let thinkingLevel = this.cfg.thinking as never;
-    if (this.cfg.model) {
-      const r = resolveCliModel({ cliModel: this.cfg.model, modelRuntime });
-      if (!r.model) throw new Error(r.error ?? `model ${this.cfg.model} not found`);
-      model = r.model;
-      thinkingLevel ??= r.thinkingLevel as never;
-    }
-    const { session } = await createAgentSession({
+    const services = await createAgentSessionServices({
       cwd,
       agentDir,
       modelRuntime,
-      resourceLoader: loader,
+      resourceLoaderOptions: {
+        systemPromptOverride: () => section.text,
+        extensionFactories: [
+          ...(await builtInExtensions(this.log)),
+          {
+            name: "va-bridge-prompt",
+            hidden: true,
+            factory: (pi) => {
+              pi.on("before_agent_start", (event) => ({
+                systemPrompt: withToolsSection(event.systemPrompt, event.systemPromptOptions),
+              }));
+            },
+          },
+        ],
+      },
+    });
+    for (const d of services.diagnostics) if (d.type === "error") this.log.error(d.message);
+    let model;
+    let thinkingLevel = this.cfg.thinking as never;
+    if (this.cfg.model) {
+      const r = await this.resolveModel(modelRuntime, this.cfg.model);
+      model = r.model;
+      thinkingLevel ??= r.thinkingLevel as never;
+    }
+    const { session } = await createAgentSessionFromServices({
+      services,
       sessionManager: SessionManager.create(cwd),
       ...(model ? { model } : {}),
       ...(thinkingLevel ? { thinkingLevel } : {}),
@@ -499,6 +579,7 @@ export function startBridge(cfg: BridgeConfig, log: Logger = consoleLogger, mode
     server.listen(cfg.port, cfg.host, () => {
       const host = cfg.host === "0.0.0.0" || cfg.host === "::" ? os.hostname() : cfg.host;
       log.info(`${BRIDGE_VERSION} (pi ${PI_VERSION}) listening on ${cfg.host}:${cfg.port}, cwd ${cfg.cwd}`);
+      void bridge.health().then((h) => log.info(`model ${h.model}${h.warning ? `. WARNING: ${h.warning}` : ""}`));
       resolve({
         bridge,
         server,
