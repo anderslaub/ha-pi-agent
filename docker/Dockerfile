@@ -2,16 +2,22 @@
 # Build from the repository root:  docker build -f docker/Dockerfile -t pi-va-bridge .
 FROM node:24-bookworm-slim
 
-ARG PI_VERSION=0.85.1
+# Unpinned on purpose: staying current (security fixes) matters more here than reproducible builds.
+# Set PI_VERSION to pin pi. "latest" is only re-resolved when the layer is rebuilt:
+#   docker compose build --pull --no-cache
+ARG PI_VERSION=latest
 
-# Tools pi likes to have (search, git, scripting). Add your own to taste.
+# OS updates, and tools pi likes to have (search, git, scripting). Add your own to taste.
 RUN apt-get update \
+ && apt-get upgrade -y \
  && apt-get install -y --no-install-recommends git ca-certificates curl ripgrep fd-find python3 tini \
  && ln -s /usr/bin/fdfind /usr/local/bin/fd \
  && rm -rf /var/lib/apt/lists/*
 
-# pi itself
-RUN npm install -g "@earendil-works/pi-coding-agent@${PI_VERSION}" && npm cache clean --force
+# The latest npm, then pi itself
+RUN npm install -g npm@latest \
+ && npm install -g "@earendil-works/pi-coding-agent@${PI_VERSION}" \
+ && npm cache clean --force
 
 # The va-bridge pi package. It uses the globally installed pi as its SDK, so both are always the same version.
 COPY package.json README.md LICENSE /opt/va-bridge/

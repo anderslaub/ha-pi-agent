@@ -89,6 +89,9 @@ docker compose up -d --build
 - **pi's state** (logins, settings, packages, session history) is kept in the `pi-agent` volume.
 - **Packages:** `PI_PACKAGES="npm:pi-web-access …"` installs extra pi packages on first start.
 - **Ownership:** the container runs as your host user (`PUID`/`PGID`), so files it writes are yours.
+- **Updates:** the image uses the latest pi, npm and Debian updates at build time, not pinned versions.
+  Docker caches those layers, so to update run `docker compose build --pull --no-cache && docker compose up -d`.
+  To pin pi, set `PI_VERSION=0.85.1` (for example) in `.env`.
 
 ### 2. The integration
 

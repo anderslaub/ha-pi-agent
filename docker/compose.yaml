@@ -10,7 +10,7 @@ services:
       context: ..
       dockerfile: docker/Dockerfile
       args:
-        PI_VERSION: ${PI_VERSION:-0.85.1}
+        PI_VERSION: ${PI_VERSION:-latest}
     image: pi-va-bridge
     container_name: pi-va-bridge
     restart: unless-stopped
