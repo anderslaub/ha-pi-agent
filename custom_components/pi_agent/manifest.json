@@ -1,7 +1,7 @@
 {
   "domain": "pi_agent",
   "name": "Pi Agent",
-  "after_dependencies": ["assist_satellite"],
+  "after_dependencies": ["assist_pipeline", "assist_satellite", "tts"],
   "codeowners": ["@anderslaub"],
   "config_flow": true,
   "dependencies": ["conversation"],
@@ -10,5 +10,5 @@
   "iot_class": "local_push",
   "issue_tracker": "https://github.com/anderslaub/ha-pi-agent/issues",
   "requirements": [],
-  "version": "0.3.1"
+  "version": "0.4.0"
 }

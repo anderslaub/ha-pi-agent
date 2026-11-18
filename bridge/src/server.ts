@@ -55,7 +55,7 @@ function builtInExtensions(log: Logger): Promise<InlineExtension[]> {
   return builtins;
 }
 
-export const BRIDGE_VERSION = "0.3.1";
+export const BRIDGE_VERSION = "0.4.0";
 
 export interface Logger {
   info(msg: string): void;

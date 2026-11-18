@@ -14,7 +14,7 @@ from homeassistant.helpers import intent, template
 from homeassistant.helpers.device_registry import DeviceEntryType, DeviceInfo
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
-from . import PiAgentConfigEntry
+from . import PiAgentConfigEntry, debug
 from .client import BridgeError, PiBridgeClient
 from .const import (
     CONF_BUDGET,
@@ -26,8 +26,10 @@ from .const import (
     CONF_WORKSPACE,
     DEFAULT_OPTIONS,
     DOMAIN,
+    EVENT_TASK_STARTED,
     SESSION_PER_DEVICE,
 )
+from .satellite import async_set_working
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -70,6 +72,7 @@ class PiAgentConversationEntity(
     async def async_added_to_hass(self) -> None:
         """When entity is added to Home Assistant."""
         await super().async_added_to_hass()
+        self.entry.runtime_data.agent_entity_id = self.entity_id
         conversation.async_set_agent(self.hass, self.entry, self)
 
     async def async_will_remove_from_hass(self) -> None:
@@ -125,39 +128,82 @@ class PiAgentConversationEntity(
         except TemplateError as err:
             return _error_result(user_input, chat_log, f"Sorry, I had a problem with my template: {err}")
 
+        source = user_input.satellite_id or user_input.device_id or "text"
+        debug.log(self.hass, self.entry, f"Heard ({source}): {user_input.text}")
+        turn = _Turn()
         try:
             async for _content in chat_log.async_add_delta_content_stream(
-                self.entity_id, _transform_stream(client, request)
+                self.entity_id, self._transform_stream(client, request, user_input, turn)
             ):
                 pass
         except BridgeError as err:
             _LOGGER.error("pi bridge error: %s", err)
+            debug.log(self.hass, self.entry, f"Error ({source}): {err}")
             return _error_result(user_input, chat_log, f"Sorry, there was a problem with pi: {err}")
+        finally:
+            if turn.tools:
+                debug.log(self.hass, self.entry, f"pi used ({source}): {'; '.join(turn.tools)}", logbook=False)
 
+        debug.log(
+            self.hass,
+            self.entry,
+            f"pi answered ({source}){' and works on in the background' if turn.detached else ''}: "
+            f"{''.join(turn.reply).strip()}",
+        )
         if not isinstance(chat_log.content[-1], conversation.AssistantContent):
             return _error_result(user_input, chat_log, "Sorry, pi did not answer.")
         return conversation.async_get_result_from_chat_log(user_input, chat_log)
 
+    async def _transform_stream(
+        self,
+        client: PiBridgeClient,
+        request: dict[str, Any],
+        user_input: conversation.ConversationInput,
+        turn: _Turn,
+    ) -> AsyncGenerator[conversation.AssistantContentDeltaDict]:
+        """Turn bridge events into chat log deltas: spoken text as content, tool use as thinking."""
+        yield {"role": "assistant"}
+        spoke = False
+        async for event in client.turn(request):
+            kind = event.get("t")
+            if kind == "text":
+                if text := event.get("d"):
+                    spoke = spoke or bool(text.strip())
+                    turn.reply.append(text)
+                    yield {"content": text}
+            elif kind == "activity":
+                turn.tools.append(str(event.get("d")))
+                yield {"thinking_content": f"{event.get('d')}\n"}
+            elif kind == "detached":
+                text = event.get("d") or ""
+                turn.detached = True
+                turn.reply.append(f" {text}" if spoke else text)
+                # pi carries on in the background: the voice device can show that (instead of waiting for
+                # an answer), until the result is announced
+                self.hass.bus.async_fire(
+                    EVENT_TASK_STARTED,
+                    {
+                        "satellite_id": user_input.satellite_id,
+                        "device_id": user_input.device_id,
+                        "conversation_id": request.get("conversation_id"),
+                    },
+                )
+                if used := await async_set_working(
+                    self.hass, user_input.satellite_id, user_input.device_id, True
+                ):
+                    debug.log(self.hass, self.entry, f"esphome.{used}: working = true", logbook=False)
+                yield {"content": f" {text}" if spoke else text}
+            elif kind == "error":
+                raise BridgeError(event.get("message") or "unknown error")
 
-async def _transform_stream(
-    client: PiBridgeClient, request: dict[str, Any]
-) -> AsyncGenerator[conversation.AssistantContentDeltaDict]:
-    """Turn bridge events into chat log deltas: spoken text as content, tool use as thinking."""
-    yield {"role": "assistant"}
-    spoke = False
-    async for event in client.turn(request):
-        kind = event.get("t")
-        if kind == "text":
-            if text := event.get("d"):
-                spoke = spoke or bool(text.strip())
-                yield {"content": text}
-        elif kind == "activity":
-            yield {"thinking_content": f"{event.get('d')}\n"}
-        elif kind == "detached":
-            text = event.get("d") or ""
-            yield {"content": f" {text}" if spoke else text}
-        elif kind == "error":
-            raise BridgeError(event.get("message") or "unknown error")
+
+class _Turn:
+    """What happened in one turn, for debug mode."""
+
+    def __init__(self) -> None:
+        self.reply: list[str] = []
+        self.tools: list[str] = []
+        self.detached = False
 
 
 def _error_result(

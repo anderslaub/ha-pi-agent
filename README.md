@@ -151,9 +151,28 @@ Home Assistant then runs the pi pipeline only when that wake word is heard.
 | Reply budget | 15 s | After this long, the task continues in the background |
 | Conversation memory | per conversation | Or one ongoing session per device |
 | Start a fresh session after | 4 h | Per-device mode only |
-| Announce results of long tasks | on | Off = only the event and notification |
+| Announce results of long tasks | on | Spoken in the voice of the assistant that uses pi. Off = only the event and notification |
+| Debug mode | off | Logs every text to and from pi (heard, replies, tool calls, background results) in the HA log and the logbook |
 | Background / busy messages | English | Change them if your assistant speaks another language |
 | Working directory | bridge default | Where pi starts (its project `AGENTS.md`, `.pi/` apply) |
+
+### Showing that pi is working (ESPHome satellites)
+
+When a task continues in the background, the integration fires `pi_agent_task_started`, and later
+`pi_agent_task_finished`. If the satellite is an ESPHome device whose firmware defines an API action
+`pi_agent_working` (one `bool` variable, `working`), it calls that action with `true`, and with `false`
+before the result is announced. The device can then show a "working" state instead of waiting for an
+answer:
+
+```yaml
+api:
+  actions:
+    - action: pi_agent_working
+      variables:
+        working: bool
+      then:
+        - lambda: ESP_LOGI("pi", "working: %d", working);
+```
 
 ### Bridge settings
 

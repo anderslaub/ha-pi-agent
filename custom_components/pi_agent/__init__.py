@@ -15,7 +15,9 @@ from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .client import BridgeAuthError, BridgeError, PiBridgeClient
+from . import debug
 from .const import CONF_ANNOUNCE, DEFAULT_OPTIONS, DOMAIN, EVENT_TASK_FINISHED
+from .satellite import async_set_working, pi_pipeline, tts_media_id
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -27,6 +29,7 @@ class PiAgentData:
     """Runtime data."""
 
     client: PiBridgeClient
+    agent_entity_id: str | None = None
 
 
 type PiAgentConfigEntry = ConfigEntry[PiAgentData]
@@ -111,15 +114,45 @@ async def _async_deliver(
             "seconds": event.get("seconds"),
         },
     )
+    seconds = event.get("seconds")
+    debug.log(
+        hass,
+        entry,
+        f"Background task {'failed' if failed else 'done'}"
+        + (f" after {seconds:.0f} s" if isinstance(seconds, (int, float)) else "")
+        + f" ({satellite or event.get('device_id') or 'no device'}): {text}",
+    )
+    # The face stops showing "working" (ESPHome devices with a pi_agent_working action)
+    if used := await async_set_working(hass, satellite, event.get("device_id"), False):
+        debug.log(hass, entry, f"esphome.{used}: working = false", logbook=False)
     options = {**DEFAULT_OPTIONS, **entry.options}
     if not options[CONF_ANNOUNCE]:
         return
     if satellite and hass.states.get(satellite) is not None:
+        data: dict[str, Any] = {"message": text, "preannounce": False}
+        # Speak with the voice of the assistant that uses pi; otherwise the satellite would use the voice of
+        # whichever assistant it has selected
+        agent_ids = {entry.entry_id} | ({entry.runtime_data.agent_entity_id} - {None})
+        pipeline = None
+        try:
+            if (pipeline := pi_pipeline(hass, agent_ids)) is not None:
+                if media_id := tts_media_id(hass, pipeline, text):
+                    data["media_id"] = media_id
+        except Exception:  # noqa: BLE001 - fall back to the satellite's own voice
+            _LOGGER.warning("Could not prepare the announcement in pi's voice", exc_info=True)
+        debug.log(
+            hass,
+            entry,
+            f"Announcing on {satellite}"
+            + (f" with the voice of assistant '{pipeline.name}'" if "media_id" in data and pipeline else "")
+            + f": {text}",
+            logbook=False,
+        )
         try:
             await hass.services.async_call(
                 "assist_satellite",
                 "announce",
-                {"message": text, "preannounce": False},
+                data,
                 target={"entity_id": satellite},
                 blocking=True,
             )
