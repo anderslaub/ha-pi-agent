@@ -7,3 +7,4 @@ custom_components
 tests
 docker/workspace
 docker/.env
+docker/SYSTEM.md

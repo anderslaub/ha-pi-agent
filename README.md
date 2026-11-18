@@ -75,6 +75,7 @@ unit, see `bridge/systemd/pi-va-bridge.service`. It uses the same settings file.
 ```sh
 cd docker
 cp .env.example .env      # PI_BRIDGE_TOKEN, model, provider key, PUID/PGID, WORKSPACE
+cp SYSTEM.md.example SYSTEM.md   # the assistant's system prompt
 docker compose up -d --build
 ```
 
@@ -102,9 +103,11 @@ docker compose up -d --build
   `docker compose exec va-bridge curl -sv -m 5 http://host.docker.internal:<port>/health`.
 - **Is it up?** `curl -H "Authorization: Bearer $PI_BRIDGE_TOKEN" http://localhost:8787/v1/health`, and
   `docker compose logs -f` for what it is doing. `PI_BRIDGE_PORT` in `.env` is the port on the host.
-- **Working folder:** `WORKSPACE` (default `docker/workspace`) is mounted as `/workspace`. On first start, if
-  it has no `.pi` folder, the entrypoint creates `.pi/va-bridge/SYSTEM.md` from `docker/SYSTEM.md` (yours, git-ignored)
-  or else `docker/SYSTEM.md.example`. Edit it on the host; new conversations pick it up.
+- **Working folder:** `WORKSPACE` (default `docker/workspace`) is mounted as `/workspace`.
+- **System prompt:** `docker/SYSTEM.md` (yours, git-ignored) is mounted read-only as the assistant's prompt,
+  `/workspace/.pi/va-bridge/SYSTEM.md`. It is read for every new conversation, so edits apply without a
+  restart. Some editors save by replacing the file, which a running container does not see; then run
+  `docker compose restart`. Compose refuses to start until the file exists.
 - **Local compose changes** (ports, extra volumes) go in `docker/compose.override.yaml` (git-ignored); docker
   compose merges it automatically.
 - **pi's state** (logins, settings, packages, session history) is kept in the `pi-agent` volume.

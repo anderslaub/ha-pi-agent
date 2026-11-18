@@ -27,8 +27,8 @@ RUN mkdir -p /opt/va-bridge/node_modules/@earendil-works \
 COPY docker/entrypoint.sh /usr/local/bin/va-bridge-entrypoint
 # "docker exec -it <container> pi" runs pi as the node user (root would leave root-owned files in ~/.pi)
 COPY docker/pi-as-node.sh /usr/local/sbin/pi
-# The default prompt for new workspaces: docker/SYSTEM.md if you made one (git-ignored), else the example
-COPY docker/SYSTEM.md* /opt/va-bridge/docker/
+# Fallback prompt when no docker/SYSTEM.md is mounted (compose mounts yours)
+COPY docker/SYSTEM.md.example /opt/va-bridge/docker/
 
 # The entrypoint starts as root only to fix folder ownership, then runs everything as the "node" user with
 # uid/gid PUID/PGID (default 1000), so files in the workspace belong to your host user.

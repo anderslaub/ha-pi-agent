@@ -13,6 +13,10 @@ if [ "$(id -u)" = 0 ]; then
   mkdir -p "$WS" /home/node/.pi/agent
   # Docker creates a missing bind-mount folder as root: hand it over (not recursively: never touch your files)
   [ "$(stat -c %u "$WS")" = "$PUID" ] || chown "$PUID:$PGID" "$WS"
+  # ... the same for the folders Docker creates for the SYSTEM.md mount
+  for d in "$WS/.pi" "$WS/.pi/va-bridge"; do
+    [ ! -d "$d" ] || [ "$(stat -c %u "$d")" = "$PUID" ] || chown "$PUID:$PGID" "$d"
+  done
   # pi's state must belong to the node user, also files a "docker exec" as root may have left behind
   find /home/node/.pi \( ! -uid "$PUID" -o ! -gid "$PGID" \) -exec chown -h "$PUID:$PGID" {} +
   exec setpriv --reuid="$PUID" --regid="$PGID" --init-groups "$0" "$@"
@@ -21,16 +25,18 @@ fi
 # --- as the node user ---------------------------------------------------------------------------------
 mkdir -p "$WS"
 
-# First start in this workspace: give it a system prompt for the assistant.
-# .pi/va-bridge/SYSTEM.md replaces pi's coding-agent prompt for assistant sessions. Edit it on the host.
-if [ ! -d "$WS/.pi" ]; then
-  mkdir -p "$WS/.pi/va-bridge"
-  if [ -f /opt/va-bridge/docker/SYSTEM.md ]; then
-    cp /opt/va-bridge/docker/SYSTEM.md "$WS/.pi/va-bridge/SYSTEM.md"
-  else
-    cp /opt/va-bridge/docker/SYSTEM.md.example "$WS/.pi/va-bridge/SYSTEM.md"
-  fi
-  echo "[entrypoint] created $WS/.pi/va-bridge/SYSTEM.md"
+# No system prompt mounted or written yet (plain "docker run"): start from the example.
+# .pi/va-bridge/SYSTEM.md replaces pi's coding-agent prompt for assistant sessions.
+PROMPT="$WS/.pi/va-bridge/SYSTEM.md"
+if [ -d "$PROMPT" ]; then
+  echo "[entrypoint] docker/SYSTEM.md is missing, so Docker mounted a folder instead. Remove the docker/SYSTEM.md" >&2
+  echo "[entrypoint] folder, then: cp SYSTEM.md.example SYSTEM.md, and docker compose up -d" >&2
+  exit 1
+fi
+if [ ! -e "$PROMPT" ]; then
+  mkdir -p "$(dirname "$PROMPT")"
+  cp /opt/va-bridge/docker/SYSTEM.md.example "$PROMPT"
+  echo "[entrypoint] created $PROMPT from the example"
 fi
 
 # Make /va-bridge available in interactive pi too (docker compose exec va-bridge pi).

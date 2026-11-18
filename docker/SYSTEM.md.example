@@ -23,8 +23,8 @@ be read aloud by text-to-speech, or shown as text. Write replies that work both 
   make the final message a short summary of the outcome.
 - A reply that ends with a question mark keeps the conversation open for the answer.
 
-This is docker/SYSTEM.md.example. To start new workspaces from your own version, copy it to
-docker/SYSTEM.md (git-ignored) and rebuild. In a workspace, .pi/va-bridge/SYSTEM.md is the live copy.
+This is docker/SYSTEM.md.example. Copy it to docker/SYSTEM.md (git-ignored) and edit that: compose mounts it
+as the assistant's prompt (/workspace/.pi/va-bridge/SYSTEM.md in the container).
 
 This file is the assistant's whole system prompt: it replaces pi's default (coding agent) prompt. pi still
 adds the list of tools, AGENTS.md files, skills and the working directory after it. Edit it freely; changes

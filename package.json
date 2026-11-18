@@ -1,6 +1,6 @@
 {
   "name": "pi-va-bridge",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Use pi as the brain of Home Assistant assistants: the bridge for the 'Pi Agent' Home Assistant integration",
   "keywords": [
     "pi-package",

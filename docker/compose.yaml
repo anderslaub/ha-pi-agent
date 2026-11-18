@@ -1,5 +1,6 @@
 # pi as the brain of Home Assistant assistants.
 #   cd docker && cp .env.example .env    # set PI_BRIDGE_TOKEN and a model provider key
+#   cp SYSTEM.md.example SYSTEM.md         # the assistant's system prompt
 #   docker compose up -d --build
 #   docker compose exec va-bridge pi       # pi inside the container: /login, /model, /va-bridge
 # Local changes (ports, extra volumes, ...) go in compose.override.yaml (git-ignored), which docker compose
@@ -44,8 +45,16 @@ services:
       PUID: ${PUID:-1000}
       PGID: ${PGID:-1000}
     volumes:
-      # The assistant's working folder, shared with the host. .pi/va-bridge/SYSTEM.md is created here on first start.
+      # The assistant's working folder, shared with the host
       - ${WORKSPACE:-./workspace}:/workspace
+      # The assistant's system prompt: docker/SYSTEM.md (git-ignored; copy it from SYSTEM.md.example).
+      # Read for every new conversation, so edits apply without a restart.
+      - type: bind
+        source: ./SYSTEM.md
+        target: /workspace/.pi/va-bridge/SYSTEM.md
+        read_only: true
+        bind:
+          create_host_path: false
       # pi's own state: logins, settings, installed packages, session history
       - pi-agent:/home/node/.pi
 
