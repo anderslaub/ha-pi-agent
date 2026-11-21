@@ -176,6 +176,12 @@ api:
         - lambda: ESP_LOGI("pi", "working: %d", working);
 ```
 
+The same way, a `pi_agent_loading` action (one `bool` variable, `loading`) is called on every ESPHome device
+that defines it while the assistant starts up: the model is loading on the llama.cpp router, the bridge is
+warming up, or the bridge cannot be reached. It is repeated every 10 s while loading, and called once with
+`false` when the assistant is ready, so a device can show a "loading" state and end it by itself when the
+refreshes stop.
+
 ### Bridge settings
 
 `~/.pi/agent/va-bridge.json`, or the `PI_BRIDGE_*` environment variable (which wins):
@@ -228,7 +234,7 @@ pi's default tools include `bash`, `edit` and `write`. Before you connect it:
 
 All requests need `Authorization: Bearer <token>`.
 
-- `GET /v1/health` returns `{ok, bridge_version, pi_version, mode, model, models_available, warning?, cwd, assistant_prompt, sessions, last_event_id}`.
+- `GET /v1/health` returns `{ok, ready, loading?, bridge_version, pi_version, mode, model, models_available, warning?, cwd, assistant_prompt, sessions, last_event_id}`.
 - `POST /v1/turn` takes `{text, session_key, language, conversation_id, device_id, satellite_id,
   instructions, budget_s, reset_after_s, cwd, detach_message, busy_message}`. It streams NDJSON lines:
   - `{"t":"text","d":…}`: speech-ready text

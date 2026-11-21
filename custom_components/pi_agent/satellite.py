@@ -15,6 +15,8 @@ _LOGGER = logging.getLogger(__name__)
 
 # ESPHome devices can define this API action (variables: working: bool) to show that pi is busy.
 WORKING_ACTION = "pi_agent_working"
+# ... and this one (variables: loading: bool) to show that the assistant is still starting up.
+LOADING_ACTION = "pi_agent_loading"
 
 
 def _device_id(hass: HomeAssistant, satellite_id: str | None, device_id: str | None) -> str | None:
@@ -57,6 +59,19 @@ async def async_set_working(
         _LOGGER.warning("Could not call esphome.%s", service, exc_info=True)
         return None
     return service
+
+
+async def async_set_loading(hass: HomeAssistant, loading: bool) -> list[str]:
+    """Tell every ESPHome device with a pi_agent_loading action whether the assistant is still starting up."""
+    services = [
+        name for name in hass.services.async_services_for_domain("esphome") if name.endswith(f"_{LOADING_ACTION}")
+    ]
+    for service in services:
+        try:
+            await hass.services.async_call("esphome", service, {"loading": loading}, blocking=True)
+        except Exception:  # noqa: BLE001 - one unreachable device must not stop the others
+            _LOGGER.debug("Could not call esphome.%s", service, exc_info=True)
+    return services
 
 
 def pi_pipeline(hass: HomeAssistant, agent_ids: set[str]) -> Pipeline | None:

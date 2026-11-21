@@ -16,8 +16,16 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .client import BridgeAuthError, BridgeError, PiBridgeClient
 from . import debug
-from .const import CONF_ANNOUNCE, CONF_FAILED_MESSAGE, DEFAULT_OPTIONS, DOMAIN, EVENT_TASK_FINISHED, TASK_CHECK_SECONDS
-from .satellite import async_set_working, pi_pipeline, tts_media_id
+from .const import (
+    CONF_ANNOUNCE,
+    CONF_FAILED_MESSAGE,
+    DEFAULT_OPTIONS,
+    DOMAIN,
+    EVENT_TASK_FINISHED,
+    READY_CHECK_SECONDS,
+    TASK_CHECK_SECONDS,
+)
+from .satellite import async_set_loading, async_set_working, pi_pipeline, tts_media_id
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -60,6 +68,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: PiAgentConfigEntry) -> b
     entry.async_create_background_task(
         hass, _async_watch_tasks(hass, entry, client), f"{DOMAIN}_tasks_{entry.entry_id}"
     )
+    entry.async_create_background_task(
+        hass, _async_watch_ready(hass, entry, client), f"{DOMAIN}_ready_{entry.entry_id}"
+    )
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True
 
@@ -95,6 +106,28 @@ async def _async_listen_for_tasks(
             _LOGGER.debug("%s; reconnecting in %ss", err, backoff)
         await asyncio.sleep(backoff)
         backoff = min(backoff * 2, 60)
+
+
+async def _async_watch_ready(hass: HomeAssistant, entry: PiAgentConfigEntry, client: PiBridgeClient) -> None:
+    """Show "loading" on voice satellites while the assistant starts up (model loading, warm-up) or the bridge
+    cannot be reached; tell them once when it is ready."""
+    was_ready: bool | None = None
+    while True:
+        try:
+            info = await client.health()
+            ready, why = bool(info.get("ready", True)), info.get("loading")
+        except BridgeError as err:
+            ready, why = False, str(err)
+        if not ready:
+            # repeated on every check: devices end "loading" by themselves when the refresh stops
+            devices = await async_set_loading(hass, True)
+            if was_ready is not False:
+                debug.log(hass, entry, f"Assistant loading ({why}); told {', '.join(devices) or 'no devices'}")
+        elif was_ready is not True:
+            devices = await async_set_loading(hass, False)
+            debug.log(hass, entry, f"Assistant ready; told {', '.join(devices) or 'no devices'}")
+        was_ready = ready
+        await asyncio.sleep(READY_CHECK_SECONDS)
 
 
 async def _async_watch_tasks(

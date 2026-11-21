@@ -32,7 +32,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import type { AgentSession, InlineExtension } from "@earendil-works/pi-coding-agent";
 import type { BridgeConfig } from "./config.ts";
-import { ensureRouterModel, llamaRouter } from "./llama.ts";
+import { ensureRouterModel, llamaRouter, routerModelId } from "./llama.ts";
 import { buildAssistantSection, loadAssistantPrompt, withToolsSection } from "./prompt.ts";
 import { SpeechFilter, toSpeech } from "./speech.ts";
 import { TurnTiming } from "./timing.ts";
@@ -61,7 +61,7 @@ function builtInExtensions(log: Logger): Promise<InlineExtension[]> {
   return builtins;
 }
 
-export const BRIDGE_VERSION = "0.4.3";
+export const BRIDGE_VERSION = "0.4.4";
 
 export interface Logger {
   info(msg: string): void;
@@ -181,6 +181,9 @@ export interface TaskStatus {
 export class Bridge {
   readonly events = new EventLog();
   private tasks = new Map<string, TaskStatus>();
+  /** startup warm-up: running now / has finished at least once */
+  private warming = false;
+  private warmedUp = false;
   private entries = new Map<string, Promise<Entry>>();
   private modelRuntime?: ModelRuntime;
   private runtimeReady?: Promise<ModelRuntime>;
@@ -222,6 +225,7 @@ export class Bridge {
   async health(): Promise<Record<string, unknown>> {
     return {
       ok: true,
+      ...(await this.readiness()),
       bridge_version: BRIDGE_VERSION,
       pi_version: PI_VERSION,
       mode: this.mode,
@@ -591,7 +595,8 @@ export class Bridge {
    * first question after a restart waits for the whole prompt to be processed.
    */
   async warmUp(): Promise<void> {
-    if (!this.cfg.warmup) return;
+    if (!this.cfg.warmup || this.warming) return;
+    this.warming = true;
     const started = Date.now();
     let last: Pick<TurnRequest, "language" | "instructions"> = {};
     try {
@@ -599,15 +604,65 @@ export class Bridge {
     } catch {
       // first start: warm up without them
     }
+    let entry: Entry | undefined;
     try {
-      const entry = await this.entry(WARMUP_KEY, { language: last.language, instructions: last.instructions });
-      await entry.session.prompt("This is a warm-up message. Reply with just: OK", { expandPromptTemplates: false });
-      await entry.session.waitForIdle();
-      this.dispose(WARMUP_KEY, entry);
+      entry = await this.entry(WARMUP_KEY, { language: last.language, instructions: last.instructions });
+      const session = entry.session;
+      // The model may still be loading (llama.cpp router): a failed attempt is retried, and only a real answer
+      // counts, so the warm-up never runs on in the background next to the first real question
+      for (let attempt = 1; ; attempt++) {
+        let error: string | undefined;
+        try {
+          await session.prompt("This is a warm-up message. Reply with just: OK", { expandPromptTemplates: false });
+          await session.waitForIdle();
+          while (!session.isIdle) await new Promise((r) => setTimeout(r, 200));
+          const lastMsg = session.messages.at(-1) as { role?: string; stopReason?: string; errorMessage?: string };
+          if (lastMsg?.role === "assistant" && (lastMsg.stopReason === "error" || lastMsg.stopReason === "aborted")) {
+            error = lastMsg.errorMessage || lastMsg.stopReason;
+          }
+        } catch (err) {
+          error = (err as Error).message;
+        }
+        if (!error) break;
+        if (attempt >= 5 || Date.now() - started > 300_000) throw new Error(error);
+        this.log.info(`warm-up attempt ${attempt} failed (${error}); retrying`);
+        await new Promise((r) => setTimeout(r, 3000));
+      }
       this.log.info(`warm-up done in ${((Date.now() - started) / 1000).toFixed(1)}s`);
     } catch (err) {
-      this.log.error("warm-up failed", err);
+      this.log.error("warm-up failed", (err as Error).message);
+    } finally {
+      if (entry) this.dispose(WARMUP_KEY, entry);
+      this.warming = false;
+      this.warmedUp = true;
     }
+  }
+
+  /**
+   * Whether the assistant answers without a long wait: the warm-up has finished, and the model is loaded on the
+   * llama.cpp router (if one is used). When the router has unloaded the model (or was restarted), this starts a
+   * new warm-up. Voice satellites show "loading" while ready is false.
+   */
+  private async readiness(): Promise<{ ready: boolean; loading?: string }> {
+    const warmupApplies = this.cfg.warmup && this.mode === "headless";
+    const router = llamaRouter();
+    let model: string | undefined;
+    if (router && this.cfg.model) {
+      try {
+        const models = await router.list();
+        const id = routerModelId(this.cfg.model, models.map((m) => m.id));
+        const status = models.find((m) => m.id === id)?.status;
+        if (id && status !== "loaded" && status !== "sleeping") model = `the model is ${status ?? "not loaded"}`;
+      } catch {
+        model = "the model server is not reachable";
+      }
+    }
+    if (model && warmupApplies && !this.warming && model !== "the model server is not reachable") {
+      void this.warmUp(); // loads the model and fills the prompt cache again
+    }
+    if (model) return { ready: false, loading: model };
+    if (warmupApplies && (this.warming || !this.warmedUp)) return { ready: false, loading: "warming up" };
+    return { ready: true };
   }
 
   private rememberForWarmup(req: TurnRequest): void {

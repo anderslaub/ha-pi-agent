@@ -211,3 +211,38 @@ async def test_status_check_delivers_a_task_whose_result_never_arrived(
     assert entry.runtime_data.tasks == {}
     await hass.config_entries.async_unload(entry.entry_id)
     await hass.async_block_till_done()
+
+
+async def test_loading_face_while_the_assistant_starts_up(
+    hass: HomeAssistant, bridge, monkeypatch, socket_enabled
+) -> None:
+    """While the bridge reports ready: false, ESPHome devices with a pi_agent_loading action are told so
+    (repeatedly); once ready, they are told once."""
+    monkeypatch.setattr("custom_components.pi_agent.READY_CHECK_SECONDS", 0.05)
+    from homeassistant.const import CONF_API_TOKEN, CONF_URL
+    from pytest_homeassistant_custom_component.common import MockConfigEntry
+
+    from custom_components.pi_agent.const import DEFAULT_OPTIONS, DOMAIN
+
+    from .conftest import TOKEN
+
+    calls = async_mock_service(hass, "esphome", "kattio_box_1_pi_agent_loading")
+    bridge.ready = False
+    entry = MockConfigEntry(
+        domain=DOMAIN, title="Pi Agent", data={CONF_URL: bridge.url, CONF_API_TOKEN: TOKEN},
+        options=dict(DEFAULT_OPTIONS),
+    )
+    entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    for _ in range(6):
+        await asyncio.sleep(0.05)
+        await hass.async_block_till_done()
+    assert len(calls) >= 2 and all(c.data == {"loading": True} for c in calls)
+    bridge.ready = True
+    for _ in range(10):
+        await asyncio.sleep(0.05)
+        await hass.async_block_till_done()
+    assert calls[-1].data == {"loading": False}
+    assert sum(1 for c in calls if c.data == {"loading": False}) == 1
+    await hass.config_entries.async_unload(entry.entry_id)
+    await hass.async_block_till_done()

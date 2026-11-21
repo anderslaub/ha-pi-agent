@@ -37,3 +37,6 @@ EVENT_TASK_FINISHED: Final = "pi_agent_task_finished"
 # While a background task runs, ask the bridge this often whether it is still going (a lost task must not
 # leave a voice satellite showing "working" for good)
 TASK_CHECK_SECONDS = 180
+# How often to ask the bridge whether the assistant is ready (model loaded, warm-up done), for the "loading"
+# face on voice satellites. While loading, the satellites get a refresh every time.
+READY_CHECK_SECONDS = 10

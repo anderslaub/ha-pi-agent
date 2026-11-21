@@ -36,6 +36,7 @@ class FakeBridge:
         self.turns: list[dict[str, Any]] = []
         self.script: list[dict[str, Any]] = [{"t": "text", "d": "Hi."}, {"t": "done"}]
         self.closed = False
+        self.ready = True
         self.events: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
         self.app = web.Application()
         self.app.router.add_get("/v1/health", self.health)
@@ -51,7 +52,7 @@ class FakeBridge:
     async def health(self, request: web.Request) -> web.Response:
         if not self._authorized(request):
             return web.json_response({"error": "unauthorized"}, status=401)
-        return web.json_response({"ok": True, "last_event_id": 0})
+        return web.json_response({"ok": True, "last_event_id": 0, "ready": self.ready})
 
     async def turn(self, request: web.Request) -> web.StreamResponse:
         if not self._authorized(request):
