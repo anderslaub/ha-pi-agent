@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncGenerator
 import logging
+import time
 from typing import Any, Literal
 
 from homeassistant.components import conversation
@@ -144,6 +145,14 @@ class PiAgentConversationEntity(
             if turn.tools:
                 debug.log(self.hass, self.entry, f"pi used ({source}): {'; '.join(turn.tools)}", logbook=False)
 
+        if debug.enabled(self.entry):
+            debug.log(self.hass, self.entry, f"Timing ({source}): {debug.timing_summary(turn.timeline())}")
+            debug.log(
+                self.hass,
+                self.entry,
+                f"Text stream ({source}): {debug.text_stream(turn.texts)}",
+                logbook=False,
+            )
         debug.log(
             self.hass,
             self.entry,
@@ -166,10 +175,13 @@ class PiAgentConversationEntity(
         spoke = False
         async for event in client.turn(request):
             kind = event.get("t")
+            if kind in ("done", "detached"):
+                turn.bridge = event.get("timing") or {}
             if kind == "text":
                 if text := event.get("d"):
                     spoke = spoke or bool(text.strip())
                     turn.reply.append(text)
+                    turn.texts.append((turn.elapsed(), text))
                     yield {"content": text}
             elif kind == "activity":
                 turn.tools.append(str(event.get("d")))
@@ -201,9 +213,20 @@ class _Turn:
     """What happened in one turn, for debug mode."""
 
     def __init__(self) -> None:
+        self.started = time.monotonic()
         self.reply: list[str] = []
         self.tools: list[str] = []
         self.detached = False
+        # (seconds since the request, text) as each piece arrived from the bridge
+        self.texts: list[tuple[float, str]] = []
+        # the bridge's own timing (ms since it got the request), from its done/detached event
+        self.bridge: dict[str, Any] = {}
+
+    def elapsed(self) -> float:
+        return time.monotonic() - self.started
+
+    def timeline(self) -> dict[str, Any]:
+        return {"total": self.elapsed(), "texts": [t for t, _ in self.texts], "bridge": self.bridge}
 
 
 def _error_result(

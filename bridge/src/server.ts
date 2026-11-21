@@ -34,6 +34,7 @@ import type { BridgeConfig } from "./config.ts";
 import { ensureRouterModel, llamaRouter } from "./llama.ts";
 import { buildAssistantSection, loadAssistantPrompt, withToolsSection } from "./prompt.ts";
 import { SpeechFilter, toSpeech } from "./speech.ts";
+import { TurnTiming } from "./timing.ts";
 
 /**
  * pi's built-in extensions (llama.cpp provider, mcp, tool-search, ...). The pi CLI loads them into every
@@ -55,7 +56,7 @@ function builtInExtensions(log: Logger): Promise<InlineExtension[]> {
   return builtins;
 }
 
-export const BRIDGE_VERSION = "0.4.0";
+export const BRIDGE_VERSION = "0.4.1";
 
 export interface Logger {
   info(msg: string): void;
@@ -129,6 +130,7 @@ interface Run {
   /** raw text of the last finished assistant message */
   lastAssistant: string;
   spokeSomething: boolean;
+  timing: TurnTiming;
   meta: { conversation_id?: string; device_id?: string | null; satellite_id?: string | null };
 }
 
@@ -384,19 +386,25 @@ export class Bridge {
     if (!run) return;
     const w = run.detached ? undefined : run.writer;
     switch (event.type) {
+      case "message_start":
+        if (event.message?.role === "assistant") run.timing.llmStart();
+        break;
       case "message_update": {
         const ame = event.assistantMessageEvent;
+        if (typeof ame?.delta === "string") run.timing.llmDelta(ame.type === "text_delta" ? ame.delta.length : 0);
         if (ame?.type === "text_delta" && w) {
           const s = run.filter.push(ame.delta);
           if (s) {
             run.lastTextAt = Date.now();
             run.spokeSomething ||= s.trim().length > 0;
+            run.timing.textSent();
             w.write(`${JSON.stringify({ t: "text", d: s })}\n`);
           }
         }
         break;
       }
       case "message_end": {
+        if (event.message?.role === "assistant") run.timing.llmEnd();
         const txt = assistantText(event.message);
         if (txt) run.lastAssistant = txt;
         if (w && event.message?.role === "assistant") {
@@ -408,7 +416,11 @@ export class Bridge {
         }
         break;
       }
+      case "tool_execution_end":
+        run.timing.toolEnd(String(event.toolCallId));
+        break;
       case "tool_execution_start":
+        run.timing.toolStart(String(event.toolCallId), String(event.toolName));
         w?.write(`${JSON.stringify({ t: "activity", d: toolSummary(event.toolName, event.args) })}\n`);
         break;
     }
@@ -419,6 +431,7 @@ export class Bridge {
     const key = req.session_key || req.conversation_id || "default";
     res.writeHead(200, { "content-type": "application/x-ndjson", "cache-control": "no-cache" });
     const send = (ev: BridgeEvent) => res.write(`${JSON.stringify(ev)}\n`);
+    const timing = new TurnTiming();
     let entry: Entry;
     try {
       entry = await this.entry(key, req);
@@ -428,6 +441,7 @@ export class Bridge {
       return;
     }
     entry.lastUsed = Date.now();
+    timing.session_ready = timing.now();
     const meta = { conversation_id: req.conversation_id, device_id: req.device_id, satellite_id: req.satellite_id };
 
     // Still working on an earlier (detached) request: queue this one behind it
@@ -450,6 +464,7 @@ export class Bridge {
       lastTextAt: 0,
       lastAssistant: "",
       spokeSomething: false,
+      timing,
       meta,
     };
     entry.run = run;
@@ -461,9 +476,11 @@ export class Bridge {
       run.detached = true;
       const rest = run.filter.flush();
       if (rest) send({ t: "text", d: rest });
+      timing.detached = timing.now();
       send({
         t: "detached",
         task_id: run.taskId,
+        timing,
         d: req.detach_message || "I'm on it. I'll let you know when it's done.",
         session_id: entry.session.sessionId,
       });
@@ -503,7 +520,8 @@ export class Bridge {
       const rest = run.filter.flush();
       if (rest) send({ t: "text", d: rest });
       if (error) send({ t: "error", message: error });
-      send({ t: "done", session_id: entry.session.sessionId });
+      timing.done = timing.now();
+      send({ t: "done", session_id: entry.session.sessionId, timing });
       res.end();
       return;
     }

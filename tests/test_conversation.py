@@ -139,9 +139,22 @@ async def test_working_face_and_announcement_in_pis_voice(
 
 async def test_debug_mode_logs_texts(hass: HomeAssistant, bridge, setup_entry, caplog) -> None:
     hass.config_entries.async_update_entry(setup_entry, options={**setup_entry.options, "debug": True})
-    bridge.script = [{"t": "text", "d": "Hello."}, {"t": "activity", "d": "bash: ls"}, {"t": "done"}]
+    timing = {
+        "session_ready": 3,
+        "llm": [{"start": 5, "first_token": 800, "first_text": 1200, "end": 1500, "chars": 6}],
+        "tools": [{"name": "bash", "start": 1500, "ms": 1900}],
+    }
+    bridge.script = [
+        {"t": "text", "d": "Hello."},
+        {"t": "activity", "d": "bash: ls"},
+        {"t": "done", "timing": timing},
+    ]
     await _say(hass, "hi there", device_id="dev1")
     log = caplog.text
+    assert "Timing (dev1): total " in log
+    assert "model call 1: start 0.01s, first token 0.80s, first text 1.20s, done 1.50s, 6 chars" in log
+    assert "tool bash: 1.90s (at 1.50s)" in log
+    assert "Text stream (dev1): +0." in log and "'Hello.'" in log
     assert "Heard (dev1): hi there" in log
     assert "pi used (dev1): bash: ls" in log
     assert "pi answered (dev1): Hello." in log
