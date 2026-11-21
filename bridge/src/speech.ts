@@ -10,6 +10,7 @@
  *  - table separator rows are dropped, table cells are joined with commas
  *  - **bold**, *italic*, `inline code`, ~~strike~~ markers are removed
  *  - [text](url) becomes "text", bare URLs become "a link"
+ *  - emojis are removed
  */
 export class SpeechFilter {
   private buf = "";
@@ -99,8 +100,16 @@ function inline(s: string): string {
     .replace(/`/g, "")
     .replace(/\*\*|__|~~/g, "")
     .replace(/(^|[\s(])\*(?=\S)([^*]*?\S)\*(?=$|[\s.,!?;:)])/g, "$1$2") // *italic*
-    .replace(/<\/?[a-zA-Z][^>]*>/g, ""); // stray html tags
+    .replace(/<\/?[a-zA-Z][^>]*>/g, "") // stray html tags
+    .replace(EMOJI, "");
 }
+
+/**
+ * Emojis (with skin tones, flags, keycaps and joined sequences) and the space before them: a TTS engine
+ * either reads them out ("hamster face") or spends a whole synthesis on a moment of noise.
+ */
+const EMOJI =
+  / ?(?:\p{Extended_Pictographic}|\p{Regional_Indicator}|[\u{1F3FB}-\u{1F3FF}\u200D\uFE0E\uFE0F\u20E3])+/gu;
 
 /** Convenience for whole strings. */
 export function toSpeech(markdown: string): string {

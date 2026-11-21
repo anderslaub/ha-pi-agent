@@ -27,3 +27,12 @@ test("streams sentences early", () => {
   assert.equal(f.flush(), "After");
   assert.equal(f.takeSkippedCode(), true);
 });
+
+test("removes emojis", () => {
+  assert.equal(
+    toSpeech("Those hamsters tripped me 🐹. Typical! 😹👍🏽 Next time 🇩🇰 I win 1️⃣ ❤️"),
+    "Those hamsters tripped me. Typical! Next time I win 1",
+  );
+  const f = new SpeechFilter();
+  assert.equal(f.push("🐹") + f.flush(), "");
+});
