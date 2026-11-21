@@ -47,3 +47,14 @@ test("system prompt: project file beats global file beats built-in", () => {
   assert.equal(s.path, path.join(cwd, ".pi", "va-bridge", "SYSTEM.md"));
   assert.match(s.text, /^project prompt\n\nThe user's language is "da".*\n\n# Instructions from Home Assistant\nBe brief\.$/s);
 });
+
+test("task timeout and warm-up defaults, and their overrides", () => {
+  const file = path.join(tmp(), "va-bridge.json");
+  const base = { PI_BRIDGE_TOKEN: "x".repeat(20) };
+  let cfg = loadConfig(base, file);
+  assert.equal(cfg.taskTimeoutMinutes, 10);
+  assert.equal(cfg.warmup, true);
+  cfg = loadConfig({ ...base, PI_BRIDGE_TASK_TIMEOUT_MIN: "3", PI_BRIDGE_WARMUP: "0" }, file);
+  assert.equal(cfg.taskTimeoutMinutes, 3);
+  assert.equal(cfg.warmup, false);
+});

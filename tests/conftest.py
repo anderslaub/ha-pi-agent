@@ -41,6 +41,8 @@ class FakeBridge:
         self.app.router.add_get("/v1/health", self.health)
         self.app.router.add_post("/v1/turn", self.turn)
         self.app.router.add_get("/v1/events", self.stream_events)
+        self.app.router.add_get("/v1/tasks/{task_id}", self.task)
+        self.tasks: dict[str, dict[str, Any]] = {}
         self.server = TestServer(self.app)
 
     def _authorized(self, request: web.Request) -> bool:
@@ -61,6 +63,10 @@ class FakeBridge:
             await resp.write((json.dumps(event) + "\n").encode())
         await resp.write_eof()
         return resp
+
+    async def task(self, request: web.Request) -> web.Response:
+        task = self.tasks.get(request.match_info["task_id"])
+        return web.json_response(task) if task else web.json_response({"error": "unknown task"}, status=404)
 
     async def stream_events(self, request: web.Request) -> web.StreamResponse:
         resp = web.StreamResponse()

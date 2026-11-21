@@ -74,6 +74,21 @@ class PiBridgeClient:
         except (aiohttp.ClientError, TimeoutError) as err:
             raise BridgeError(f"Lost the connection to the pi bridge: {err}") from err
 
+    async def task(self, task_id: str) -> dict[str, Any] | None:
+        """Status of a background task (state: running/done/failed), or None if the bridge does not know it."""
+        try:
+            async with self._session.get(
+                f"{self._url}/v1/tasks/{task_id}",
+                headers=self._headers,
+                timeout=aiohttp.ClientTimeout(total=10),
+            ) as resp:
+                if resp.status == 404:
+                    return None
+                await self._check(resp)
+                return await resp.json()
+        except (aiohttp.ClientError, TimeoutError) as err:
+            raise BridgeError(f"Cannot reach the pi bridge: {err}") from err
+
     async def abort(self, session_key: str) -> None:
         """Abort what the agent is doing in a session."""
         try:

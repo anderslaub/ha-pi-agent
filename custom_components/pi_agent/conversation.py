@@ -190,6 +190,14 @@ class PiAgentConversationEntity(
                 text = event.get("d") or ""
                 turn.detached = True
                 turn.reply.append(f" {text}" if spoke else text)
+                if task_id := event.get("task_id"):
+                    # checked every few minutes until its result is delivered
+                    self.entry.runtime_data.tasks[task_id] = {
+                        "satellite_id": user_input.satellite_id,
+                        "device_id": user_input.device_id,
+                        "conversation_id": request.get("conversation_id"),
+                        "session_id": event.get("session_id"),
+                    }
                 # pi carries on in the background: the voice device can show that (instead of waiting for
                 # an answer), until the result is announced
                 self.hass.bus.async_fire(

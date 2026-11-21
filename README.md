@@ -153,7 +153,7 @@ Home Assistant then runs the pi pipeline only when that wake word is heard.
 | Start a fresh session after | 4 h | Per-device mode only |
 | Announce results of long tasks | on | Spoken in the voice of the assistant that uses pi. Off = only the event and notification |
 | Debug mode | off | Logs every text to and from pi (heard, replies, tool calls, background results) in the HA log and the logbook |
-| Background / busy messages | English | Change them if your assistant speaks another language |
+| Background / busy / failed messages | English | Change them if your assistant speaks another language. In the failed message, `{error}` is replaced by the reason |
 | Working directory | bridge default | Where pi starts (its project `AGENTS.md`, `.pi/` apply) |
 
 ### Showing that pi is working (ESPHome satellites)
@@ -162,7 +162,9 @@ When a task continues in the background, the integration fires `pi_agent_task_st
 `pi_agent_task_finished`. If the satellite is an ESPHome device whose firmware defines an API action
 `pi_agent_working` (one `bool` variable, `working`), it calls that action with `true`, and with `false`
 before the result is announced. The device can then show a "working" state instead of waiting for an
-answer:
+answer. Every 3 minutes the integration asks the bridge whether each task is still running; a task that
+finished without its result arriving, or that the bridge no longer knows, is announced from there (the
+failed message), so a satellite never stays in "working":
 
 ```yaml
 api:
@@ -188,7 +190,10 @@ api:
 | `tools` | `PI_BRIDGE_TOOLS` | pi default | List (or comma string) to restrict tools |
 | `idleMinutes` | `PI_BRIDGE_IDLE_MINUTES` | 120 | Unload idle sessions from memory |
 | `budgetSeconds` | `PI_BRIDGE_BUDGET_S` | 15 | Reply budget when HA sends none |
+| `taskTimeoutMinutes` | `PI_BRIDGE_TASK_TIMEOUT_MIN` | 10 | A background task running longer is stopped and reported as failed |
+| `warmup` | `PI_BRIDGE_WARMUP` | true | One throwaway turn at startup (same prompt and tools as the last real turn), so the model server has the long prompt cached before the first question |
 | `autostart` | `PI_BRIDGE_AUTOSTART` | false | Start with interactive pi |
+| – | `HA_TOKEN` | – | Docker: a Home Assistant long-lived access token, for an MCP server entry in pi's `~/.pi/agent/mcp.json` (`"headers": {"Authorization": "Bearer ${HA_TOKEN}"}`), so the token stays out of prompts |
 
 ### System prompt
 
@@ -232,6 +237,7 @@ All requests need `Authorization: Bearer <token>`.
   - `{"t":"error","message":…}`
   - `{"t":"done"}`
 - `POST /v1/abort` takes `{session_key}`.
+- `GET /v1/tasks/<task_id>` returns `{task_id, state: running|done|failed, seconds, tool?, text?, error?}` (404 if unknown).
 - `GET /v1/events?since=<id>` streams NDJSON `task_done` / `task_failed` events (with
   `satellite_id`, `text`, `error`) and pings every 15 s.
 

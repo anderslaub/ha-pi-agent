@@ -37,6 +37,11 @@ services:
       PI_BRIDGE_TOOLS: ${PI_BRIDGE_TOOLS:-}
       PI_BRIDGE_IDLE_MINUTES: ${PI_BRIDGE_IDLE_MINUTES:-120}
       PI_BRIDGE_BUDGET_S: ${PI_BRIDGE_BUDGET_S:-15}
+      PI_BRIDGE_TASK_TIMEOUT_MIN: ${PI_BRIDGE_TASK_TIMEOUT_MIN:-10}
+      PI_BRIDGE_WARMUP: ${PI_BRIDGE_WARMUP:-1}
+      # Long-lived Home Assistant access token, for pi's mcp.json ("Authorization": "Bearer ${HA_TOKEN}"):
+      # keeps the token out of prompts and config files
+      HA_TOKEN: ${HA_TOKEN:-}
       # Extra pi packages installed on first start, space separated
       PI_PACKAGES: ${PI_PACKAGES:-}
       PI_ALLOW_SCRIPTS: ${PI_ALLOW_SCRIPTS:-}

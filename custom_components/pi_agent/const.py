@@ -11,6 +11,7 @@ CONF_RESET_HOURS: Final = "reset_hours"
 CONF_ANNOUNCE: Final = "announce"
 CONF_DETACH_MESSAGE: Final = "detach_message"
 CONF_BUSY_MESSAGE: Final = "busy_message"
+CONF_FAILED_MESSAGE: Final = "failed_message"
 CONF_WORKSPACE: Final = "workspace"
 CONF_DEBUG: Final = "debug"
 
@@ -25,9 +26,14 @@ DEFAULT_OPTIONS: Final = {
     CONF_ANNOUNCE: True,
     CONF_DETACH_MESSAGE: "I'm on it. I'll let you know when it's done.",
     CONF_BUSY_MESSAGE: "I'm still working on the last thing. I'll get to that right after.",
+    CONF_FAILED_MESSAGE: "Sorry, I couldn't finish that task.",
     CONF_WORKSPACE: "",
     CONF_DEBUG: False,
 }
 
 EVENT_TASK_STARTED: Final = "pi_agent_task_started"
 EVENT_TASK_FINISHED: Final = "pi_agent_task_finished"
+
+# While a background task runs, ask the bridge this often whether it is still going (a lost task must not
+# leave a voice satellite showing "working" for good)
+TASK_CHECK_SECONDS = 180

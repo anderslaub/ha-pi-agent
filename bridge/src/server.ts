@@ -5,6 +5,7 @@
  *   GET  /v1/health                 -> bridge/pi info
  *   POST /v1/turn                   -> run one conversation turn, streams NDJSON events back
  *   POST /v1/abort                  -> abort whatever a session is doing
+ *   GET  /v1/tasks/<task_id>        -> status of a background task (running / done / failed)
  *   GET  /v1/events?since=<id>      -> long-lived NDJSON stream of background task results
  *
  * Each Home Assistant conversation (or device, see session_key) maps to a real pi session that is saved to
@@ -41,6 +42,10 @@ import { TurnTiming } from "./timing.ts";
  * session, but the SDK does not export them, so load them from pi's own files. Settings that disable a
  * built-in ("-builtin:llama.cpp") still apply. Empty if a pi version moves them.
  */
+/** The language and instructions of the last real turn, for the startup warm-up (the prompt must match) */
+const WARMUP_KEY = "__warmup__";
+const warmupFile = () => path.join(getAgentDir(), "va-bridge-warmup.json");
+
 let builtins: Promise<InlineExtension[]> | undefined;
 function builtInExtensions(log: Logger): Promise<InlineExtension[]> {
   builtins ??= (async () => {
@@ -56,7 +61,7 @@ function builtInExtensions(log: Logger): Promise<InlineExtension[]> {
   return builtins;
 }
 
-export const BRIDGE_VERSION = "0.4.2";
+export const BRIDGE_VERSION = "0.4.3";
 
 export interface Logger {
   info(msg: string): void;
@@ -131,6 +136,8 @@ interface Run {
   lastAssistant: string;
   spokeSomething: boolean;
   timing: TurnTiming;
+  /** stopped for running longer than taskTimeoutMinutes */
+  timedOut?: boolean;
   meta: { conversation_id?: string; device_id?: string | null; satellite_id?: string | null };
 }
 
@@ -157,8 +164,23 @@ function assistantText(message: { role?: string; content?: unknown }): string {
     .join("");
 }
 
+/** A background task as GET /v1/tasks/<id> reports it (finished ones are kept for a while) */
+export interface TaskStatus {
+  task_id: string;
+  session_key: string;
+  state: "running" | "done" | "failed";
+  started: number;
+  seconds: number;
+  /** the tool pi is running right now, or ran last */
+  tool?: string;
+  error?: string;
+  /** what pi said at the end (done tasks) */
+  text?: string;
+}
+
 export class Bridge {
   readonly events = new EventLog();
+  private tasks = new Map<string, TaskStatus>();
   private entries = new Map<string, Promise<Entry>>();
   private modelRuntime?: ModelRuntime;
   private runtimeReady?: Promise<ModelRuntime>;
@@ -334,7 +356,8 @@ export class Bridge {
     }
     const { session } = await createAgentSessionFromServices({
       services,
-      sessionManager: SessionManager.create(cwd),
+      // the warm-up session leaves no history behind
+      sessionManager: key === WARMUP_KEY ? SessionManager.inMemory(cwd) : SessionManager.create(cwd),
       ...(model ? { model } : {}),
       ...(thinkingLevel ? { thinkingLevel } : {}),
       ...(this.cfg.tools ? { tools: this.cfg.tools } : {}),
@@ -420,6 +443,10 @@ export class Bridge {
         run.timing.toolEnd(String(event.toolCallId));
         break;
       case "tool_execution_start":
+        if (run.detached) {
+          const task = this.tasks.get(run.taskId);
+          if (task) task.tool = toolSummary(event.toolName, event.args);
+        }
         run.timing.toolStart(String(event.toolCallId), String(event.toolName));
         w?.write(`${JSON.stringify({ t: "activity", d: toolSummary(event.toolName, event.args) })}\n`);
         break;
@@ -432,6 +459,7 @@ export class Bridge {
     res.writeHead(200, { "content-type": "application/x-ndjson", "cache-control": "no-cache" });
     const send = (ev: BridgeEvent) => res.write(`${JSON.stringify(ev)}\n`);
     const timing = new TurnTiming();
+    this.rememberForWarmup(req);
     let entry: Entry;
     try {
       entry = await this.entry(key, req);
@@ -485,12 +513,20 @@ export class Bridge {
         session_id: entry.session.sessionId,
       });
       res.end();
+      this.tasks.set(run.taskId, { task_id: run.taskId, session_key: key, state: "running", started, seconds: 0 });
       this.log.info(`${key}: turn detached after ${Math.round((Date.now() - started) / 1000)}s`);
     };
+    const taskTimeoutMs = Math.max(1, this.cfg.taskTimeoutMinutes) * 60_000;
     // Detach once the budget is used up, but never in the middle of a sentence that is being streamed
     const timer = setInterval(() => {
       const now = Date.now();
       if (now - started > budgetMs && now - run.lastTextAt > 1500) detach();
+      // A background task must never run forever (e.g. a model going round in circles with its tools)
+      if (run.detached && !run.timedOut && now - started > taskTimeoutMs) {
+        run.timedOut = true;
+        this.log.info(`${key}: background task stopped after ${this.cfg.taskTimeoutMinutes} min`);
+        void entry.session.abort();
+      }
     }, 250);
 
     res.on("close", () => {
@@ -515,6 +551,9 @@ export class Bridge {
     if (!error && last?.role === "assistant" && (last.stopReason === "error" || last.stopReason === "aborted")) {
       error = last.errorMessage || `Request ${last.stopReason}`;
     }
+    if (run.timedOut) {
+      error = `it was still not done after ${this.cfg.taskTimeoutMinutes} minutes, so I stopped it`;
+    }
 
     if (!run.detached) {
       const rest = run.filter.flush();
@@ -536,7 +575,60 @@ export class Bridge {
       error,
       seconds: Math.round((Date.now() - started) / 1000),
     });
+    const task = this.tasks.get(run.taskId);
+    if (task) {
+      task.state = error ? "failed" : "done";
+      task.error = error;
+      task.text = error ? undefined : speech;
+      task.seconds = Math.round((Date.now() - started) / 1000);
+    }
     this.log.info(`${key}: background task ${error ? "failed" : "done"}`);
+  }
+
+  /**
+   * One throwaway turn with the same system prompt and tools as real turns (language and Home Assistant's
+   * instructions from the last real turn), so the model server has that long prompt cached: otherwise the
+   * first question after a restart waits for the whole prompt to be processed.
+   */
+  async warmUp(): Promise<void> {
+    if (!this.cfg.warmup) return;
+    const started = Date.now();
+    let last: Pick<TurnRequest, "language" | "instructions"> = {};
+    try {
+      last = JSON.parse(fs.readFileSync(warmupFile(), "utf8"));
+    } catch {
+      // first start: warm up without them
+    }
+    try {
+      const entry = await this.entry(WARMUP_KEY, { language: last.language, instructions: last.instructions });
+      await entry.session.prompt("This is a warm-up message. Reply with just: OK", { expandPromptTemplates: false });
+      await entry.session.waitForIdle();
+      this.dispose(WARMUP_KEY, entry);
+      this.log.info(`warm-up done in ${((Date.now() - started) / 1000).toFixed(1)}s`);
+    } catch (err) {
+      this.log.error("warm-up failed", err);
+    }
+  }
+
+  private rememberForWarmup(req: TurnRequest): void {
+    const want = JSON.stringify({ language: req.language, instructions: req.instructions });
+    try {
+      if (fs.existsSync(warmupFile()) && fs.readFileSync(warmupFile(), "utf8") === want) return;
+      fs.writeFileSync(warmupFile(), want);
+    } catch {
+      // only an optimisation
+    }
+  }
+
+  /** Status of a background task: running, done or failed; undefined when unknown (or long forgotten) */
+  task(id: string): TaskStatus | undefined {
+    const now = Date.now();
+    for (const [tid, t] of this.tasks) {
+      if (t.state !== "running" && now - t.started - t.seconds * 1000 > 3_600_000) this.tasks.delete(tid);
+    }
+    const t = this.tasks.get(id);
+    if (t?.state === "running") t.seconds = Math.round((now - t.started) / 1000);
+    return t;
   }
 
   async abort(key: string): Promise<boolean> {
@@ -581,6 +673,10 @@ export function createServer(cfg: BridgeConfig, bridge: Bridge, log: Logger = co
         if (typeof body.text !== "string" || !body.text.trim()) return json(400, { error: "text is required" });
         return await bridge.turn(body, res);
       }
+      if (req.method === "GET" && url.pathname.startsWith("/v1/tasks/")) {
+        const task = bridge.task(decodeURIComponent(url.pathname.slice("/v1/tasks/".length)));
+        return task ? json(200, task) : json(404, { error: "unknown task" });
+      }
       if (req.method === "POST" && url.pathname === "/v1/abort") {
         const body = await readJson(req);
         return json(200, { aborted: await bridge.abort(String(body.session_key ?? "")) });
@@ -620,7 +716,10 @@ export function startBridge(cfg: BridgeConfig, log: Logger = consoleLogger, mode
     server.listen(cfg.port, cfg.host, () => {
       const host = cfg.host === "0.0.0.0" || cfg.host === "::" ? os.hostname() : cfg.host;
       log.info(`${BRIDGE_VERSION} (pi ${PI_VERSION}) listening on ${cfg.host}:${cfg.port}, cwd ${cfg.cwd}`);
-      void bridge.health().then((h) => log.info(`model ${h.model}${h.warning ? `. WARNING: ${h.warning}` : ""}`));
+      void bridge
+        .health()
+        .then((h) => log.info(`model ${h.model}${h.warning ? `. WARNING: ${h.warning}` : ""}`))
+        .then(() => (mode === "headless" ? bridge.warmUp() : undefined));
       resolve({
         bridge,
         server,

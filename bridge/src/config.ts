@@ -17,6 +17,10 @@ export interface BridgeConfig {
   tools?: string[];
   idleMinutes: number;
   defaultBudgetS: number;
+  /** a background task that runs longer than this is stopped (and reported as failed) */
+  taskTimeoutMinutes: number;
+  /** run one throwaway turn at startup, so the model server has the long prompt cached before the first question */
+  warmup: boolean;
   /** extension only: start the bridge when an interactive pi starts */
   autostart: boolean;
 }
@@ -32,6 +36,8 @@ export interface ConfigFile {
   tools?: string[] | string;
   idleMinutes?: number;
   budgetSeconds?: number;
+  taskTimeoutMinutes?: number;
+  warmup?: boolean;
   autostart?: boolean;
 }
 
@@ -80,6 +86,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, file = configPa
     tools: list(env.PI_BRIDGE_TOOLS || f.tools),
     idleMinutes: Number(env.PI_BRIDGE_IDLE_MINUTES || f.idleMinutes || 120),
     defaultBudgetS: Number(env.PI_BRIDGE_BUDGET_S || f.budgetSeconds || 15),
+    taskTimeoutMinutes: Number(env.PI_BRIDGE_TASK_TIMEOUT_MIN || f.taskTimeoutMinutes || 10),
+    warmup: env.PI_BRIDGE_WARMUP ? env.PI_BRIDGE_WARMUP !== "0" : f.warmup !== false,
     autostart: env.PI_BRIDGE_AUTOSTART ? env.PI_BRIDGE_AUTOSTART === "1" : Boolean(f.autostart),
   };
 }

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import logging
 from typing import Any
 
@@ -16,7 +16,7 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .client import BridgeAuthError, BridgeError, PiBridgeClient
 from . import debug
-from .const import CONF_ANNOUNCE, DEFAULT_OPTIONS, DOMAIN, EVENT_TASK_FINISHED
+from .const import CONF_ANNOUNCE, CONF_FAILED_MESSAGE, DEFAULT_OPTIONS, DOMAIN, EVENT_TASK_FINISHED, TASK_CHECK_SECONDS
 from .satellite import async_set_working, pi_pipeline, tts_media_id
 
 _LOGGER = logging.getLogger(__name__)
@@ -30,6 +30,10 @@ class PiAgentData:
 
     client: PiBridgeClient
     agent_entity_id: str | None = None
+    # background tasks in progress: task_id -> who asked (satellite_id, device_id, conversation_id, ...)
+    tasks: dict[str, dict[str, Any]] = field(default_factory=dict)
+    # task ids whose result was delivered (by the event stream or the status check), so it is never announced twice
+    delivered: list[str] = field(default_factory=list)
 
 
 type PiAgentConfigEntry = ConfigEntry[PiAgentData]
@@ -52,6 +56,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: PiAgentConfigEntry) -> b
         hass,
         _async_listen_for_tasks(hass, entry, client, info.get("last_event_id")),
         f"{DOMAIN}_events_{entry.entry_id}",
+    )
+    entry.async_create_background_task(
+        hass, _async_watch_tasks(hass, entry, client), f"{DOMAIN}_tasks_{entry.entry_id}"
     )
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True
@@ -90,16 +97,58 @@ async def _async_listen_for_tasks(
         backoff = min(backoff * 2, 60)
 
 
+async def _async_watch_tasks(
+    hass: HomeAssistant, entry: PiAgentConfigEntry, client: PiBridgeClient
+) -> None:
+    """Every few minutes, check the background tasks in progress. A task the bridge finished without the
+    result reaching us (the event stream dropped), or one it no longer knows (it restarted), is delivered
+    from here, so the satellite stops showing "working" and says what happened."""
+    while True:
+        await asyncio.sleep(TASK_CHECK_SECONDS)
+        for task_id, meta in list(entry.runtime_data.tasks.items()):
+            try:
+                status = await client.task(task_id)
+            except BridgeError as err:
+                debug.log(hass, entry, f"Could not check background task {task_id}: {err}", logbook=False)
+                continue
+            if status is None:
+                event = {**meta, "t": "task_failed", "error": "I lost track of it. The pi bridge may have restarted"}
+            elif status.get("state") == "running":
+                debug.log(
+                    hass,
+                    entry,
+                    f"Background task still running after {status.get('seconds', 0):.0f} s"
+                    + (f", now: {status['tool']}" if status.get("tool") else ""),
+                    logbook=False,
+                )
+                continue
+            else:
+                event = {
+                    **meta,
+                    "t": f"task_{status.get('state')}",
+                    "text": status.get("text"),
+                    "error": status.get("error"),
+                    "seconds": status.get("seconds"),
+                }
+            await _async_deliver(hass, entry, {**event, "task_id": task_id})
+
+
 async def _async_deliver(
     hass: HomeAssistant, entry: PiAgentConfigEntry, event: dict[str, Any]
 ) -> None:
     """Announce a finished background task on the satellite that asked for it."""
+    data = entry.runtime_data
+    if (task_id := event.get("task_id")) is not None:
+        if task_id in data.delivered:
+            return
+        data.delivered = [*data.delivered[-49:], task_id]
+        data.tasks.pop(task_id, None)
     failed = event.get("t") == "task_failed"
-    text = (
-        f"Sorry, that task failed: {event.get('error')}"
-        if failed
-        else (event.get("text") or "I'm done.")
-    )
+    if failed:
+        template = {**DEFAULT_OPTIONS, **entry.options}[CONF_FAILED_MESSAGE]
+        text = template.replace("{error}", str(event.get("error") or "unknown error"))
+    else:
+        text = event.get("text") or "I'm done."
     satellite = event.get("satellite_id")
     hass.bus.async_fire(
         EVENT_TASK_FINISHED,
@@ -120,7 +169,8 @@ async def _async_deliver(
         entry,
         f"Background task {'failed' if failed else 'done'}"
         + (f" after {seconds:.0f} s" if isinstance(seconds, (int, float)) else "")
-        + f" ({satellite or event.get('device_id') or 'no device'}): {text}",
+        + f" ({satellite or event.get('device_id') or 'no device'}): {text}"
+        + (f" (reason: {event.get('error')})" if failed else ""),
     )
     # The face stops showing "working" (ESPHome devices with a pi_agent_working action)
     if used := await async_set_working(hass, satellite, event.get("device_id"), False):

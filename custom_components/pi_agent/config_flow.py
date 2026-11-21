@@ -38,6 +38,7 @@ from .const import (
     CONF_BUSY_MESSAGE,
     CONF_DEBUG,
     CONF_DETACH_MESSAGE,
+    CONF_FAILED_MESSAGE,
     CONF_PROMPT,
     CONF_RESET_HOURS,
     CONF_SESSION_MODE,
@@ -167,6 +168,7 @@ class PiAgentOptionsFlow(OptionsFlow):
                 vol.Required(CONF_ANNOUNCE): BooleanSelector(),
                 vol.Required(CONF_DETACH_MESSAGE): TextSelector(),
                 vol.Required(CONF_BUSY_MESSAGE): TextSelector(),
+                vol.Optional(CONF_FAILED_MESSAGE): TextSelector(),
                 vol.Optional(CONF_WORKSPACE): TextSelector(),
                 vol.Optional(CONF_DEBUG, default=False): BooleanSelector(),
             }

@@ -78,6 +78,10 @@ async def test_background_task_is_announced(hass: HomeAssistant, bridge, setup_e
 
 
 async def test_background_task_without_satellite_notifies(hass: HomeAssistant, bridge, setup_entry) -> None:
+    # the failure message is configurable; {error} is the reason
+    hass.config_entries.async_update_entry(
+        setup_entry, options={**setup_entry.options, "failed_message": "That went wrong: {error}"}
+    )
     await bridge.events.put({"t": "task_failed", "id": 1, "error": "boom"})
     for _ in range(50):
         await asyncio.sleep(0.05)
@@ -87,7 +91,7 @@ async def test_background_task_without_satellite_notifies(hass: HomeAssistant, b
     from homeassistant.components.persistent_notification import _async_get_or_create_notifications
 
     notifications = _async_get_or_create_notifications(hass)
-    assert any("boom" in n["message"] for n in notifications.values())
+    assert any(n["message"] == "That went wrong: boom" for n in notifications.values())
 
 
 async def test_working_face_and_announcement_in_pis_voice(
@@ -158,3 +162,52 @@ async def test_debug_mode_logs_texts(hass: HomeAssistant, bridge, setup_entry, c
     assert "Heard (dev1): hi there" in log
     assert "pi used (dev1): bash: ls" in log
     assert "pi answered (dev1): Hello." in log
+
+
+async def test_status_check_delivers_a_task_whose_result_never_arrived(
+    hass: HomeAssistant, bridge, monkeypatch, socket_enabled
+) -> None:
+    """The event stream missed the result: the periodic status check announces it, once; a task the bridge
+    no longer knows is reported as lost."""
+    monkeypatch.setattr("custom_components.pi_agent.TASK_CHECK_SECONDS", 0.05)
+    from homeassistant.const import CONF_API_TOKEN, CONF_URL
+    from pytest_homeassistant_custom_component.common import MockConfigEntry
+
+    from custom_components.pi_agent.const import DEFAULT_OPTIONS, DOMAIN
+
+    from .conftest import TOKEN
+
+    entry = MockConfigEntry(
+        domain=DOMAIN, title="Pi Agent", data={CONF_URL: bridge.url, CONF_API_TOKEN: TOKEN},
+        options=dict(DEFAULT_OPTIONS),
+    )
+    entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    announce = async_mock_service(hass, "assist_satellite", "announce")
+    hass.states.async_set("assist_satellite.kattio_box_1", "idle")
+
+    bridge.script = [{"t": "detached", "d": "I'm on it.", "task_id": "t1"}]
+    await _say(hass, "list the lights", satellite_id="assist_satellite.kattio_box_1")
+    bridge.script = [{"t": "detached", "d": "I'm on it.", "task_id": "t2"}]
+    await _say(hass, "and the switches", satellite_id="assist_satellite.kattio_box_1")
+    assert set(entry.runtime_data.tasks) == {"t1", "t2"}
+
+    bridge.tasks["t1"] = {"task_id": "t1", "state": "running", "seconds": 30}
+    await asyncio.sleep(0.2)
+    await hass.async_block_till_done()
+    # t1 still running; t2 unknown to the bridge: reported as lost
+    assert [c.data["message"] for c in announce] == ["Sorry, I couldn't finish that task."]
+    bridge.tasks["t1"] = {"task_id": "t1", "state": "done", "seconds": 90, "text": "There are 12 lights."}
+    for _ in range(20):
+        await asyncio.sleep(0.05)
+        await hass.async_block_till_done()
+    # the late event from the stream must not announce it a second time
+    await bridge.events.put({"t": "task_done", "id": 1, "task_id": "t1", "text": "There are 12 lights."})
+    for _ in range(10):
+        await asyncio.sleep(0.05)
+        await hass.async_block_till_done()
+    assert [c.data["message"] for c in announce][1:] == ["There are 12 lights."]
+    assert entry.runtime_data.tasks == {}
+    await hass.config_entries.async_unload(entry.entry_id)
+    await hass.async_block_till_done()

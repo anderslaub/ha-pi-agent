@@ -44,6 +44,7 @@
           "announce": "Announce results of long tasks",
           "detach_message": "Message when a task continues in the background",
           "busy_message": "Message when pi is still busy",
+          "failed_message": "Message when a background task fails",
           "workspace": "Working directory on the pi host",
           "debug": "Debug mode"
         },
@@ -52,6 +53,7 @@
           "reply_budget": "If pi is still working after this long, it says the background message and announces the answer on the same voice device when done.",
           "reset_hours": "Only for one session per device: how long it must be quiet before pi starts a new session.",
           "workspace": "Leave empty to use the bridge's PI_BRIDGE_CWD.",
+          "failed_message": "Announced when a background task fails, is stopped for taking too long, or gets lost. {error} is replaced by the reason (e.g. \"Sorry, that failed: {error}\"); the reason is always in the debug log.",
           "debug": "Log every text to and from pi (what was heard, pi's replies, tool calls, background results) in the Home Assistant log and the logbook.",
           "announce": "Spoken on the voice device in the voice of the assistant that uses pi. ESPHome devices with a pi_agent_working action show that pi is working meanwhile."
         }
