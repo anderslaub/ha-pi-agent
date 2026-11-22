@@ -155,6 +155,61 @@ Home Assistant then runs the pi pipeline only when that wake word is heard.
 | Debug mode | off | Logs every text to and from pi (heard, replies, tool calls, background results) in the HA log and the logbook |
 | Background / busy / failed messages | English | Change them if your assistant speaks another language. In the failed message, `{error}` is replaced by the reason |
 | Working directory | bridge default | Where pi starts (its project `AGENTS.md`, `.pi/` apply) |
+| Ignore background speech after a false wake-up | on | The noise filter, see below |
+
+### Noise filter (TV, radio)
+
+Wake words also fire on the TV. The assistant would then answer whatever the TV said and wait for a reply.
+With the noise filter, the first text of a conversation from a voice device (and only that: follow-ups of a
+real conversation and typed chats are not checked) is first judged by a classifier: was it meant for the
+assistant? If not, pi never sees it. The chat model (thinking off) makes one short sarcastic remark about what
+it heard and asks whether that was meant for it. If the answer is background speech again (or "no, that was the
+TV"), the conversation ends without a word. A real answer ("yes, turn on the light") goes to pi with what came
+before. When in doubt the text counts as meant for the assistant, and when the check fails the turn goes through.
+
+The filter is optional: it needs a classifier. That is TypeSafe's Jev when a TypeSafe API key is set
+(`TYPESAFE_API_KEY`: fast and cheap, but the heard text goes to api.typesafe.ai), or any classifier model in
+`PI_BRIDGE_SCREEN_MODEL`, e.g. the chat model on llama.cpp read out as a classifier (`llama.cpp/<model id>`,
+about 0.8 s per check with a 35B-A3B model on a Radeon 890M), or `text` to have the chat model answer in text.
+Without any of these, nothing is screened.
+
+The filter needs to know where a conversation starts: an ESPHome satellite should start a new conversation per
+wake word (`id(va).reset_conversation_id();` before `voice_assistant.start`). A device with its own
+continuous-conversation mode can define a `pi_agent_dismiss` action (no variables), called when the
+conversation ends quietly, to end that mode too.
+
+### Sense of time, short-term memory and wake-ups
+
+Each new session starts with a short context block in front of the first message (later messages get the time):
+
+```
+The time is right now 07:42, it's Monday the 23/11 2026.
+
+Background notes, for reference only. They are probably unrelated to what the user wants now: do not bring them
+up and do not let them steer your answer, unless the user asks about them or a dated item is due (today, or just past).
+Your last conversation was 9 hours ago, at 22:40 yesterday (Sunday 22/11).
+In it you talked about: "Ellie, on assist_satellite.kattio_box_1, talked about her school concert ..." (this may be irrelevant now)
+Earlier: "..."
+Calendar notes:
+- Thu 26/11, 19:00: Ellie's school concert
+- Sat 28/11: Ellie goes to her mom's place for the weekend
+```
+
+The note (`short-term-memory.md` in the workspace) is rewritten by the chat model, thinking off, when a
+conversation has been quiet for a minute (a voice device starts a new conversation per wake word): who the assistant talked to and what about (with links or file
+names for the details), one line condensing the conversations before, and a mini calendar. Past dates stay a few
+days, so the assistant can ask how the concert went. Long-term facts belong in pi's own memory; this note is the
+recent thread. The block is part of the message and not of the system prompt: in the model's prompt the system
+prompt is followed by the tool list, and changing it would make llama.cpp process all of it again for every
+session (about 8 s for 8,000 tokens on a Radeon 890M).
+
+The assistant also gets tools to wake itself up (`wakeup_set`, `wakeup_list`, `wakeup_cancel`): at that time it
+speaks up by itself on the voice device it was talking on, to remind someone or to ask how something went. It
+uses them when asked, and may on its own. The bridge runs a short turn when one is due and publishes the reply;
+the integration says it on the satellite, and when it ends with a question it starts a conversation so the answer
+is heard (`assist_satellite.start_conversation`). Without a voice device it becomes a notification. Every wake-up
+fires the `pi_agent_wakeup` event. Wake-ups are kept in `~/.pi/agent/va-bridge-wakeups.json`; one that was due
+while the bridge was down is done up to 30 minutes late.
 
 ### Showing that pi is working (ESPHome satellites)
 
@@ -198,6 +253,14 @@ refreshes stop.
 | `budgetSeconds` | `PI_BRIDGE_BUDGET_S` | 15 | Reply budget when HA sends none |
 | `taskTimeoutMinutes` | `PI_BRIDGE_TASK_TIMEOUT_MIN` | 10 | A background task running longer is stopped and reported as failed |
 | `warmup` | `PI_BRIDGE_WARMUP` | true | One throwaway turn at startup (same prompt and tools as the last real turn), so the model server has the long prompt cached before the first question |
+| `screenModel` | `PI_BRIDGE_SCREEN_MODEL` | Jev with `TYPESAFE_API_KEY`, else no screening | Noise filter classifier, e.g. `typesafe/jev-latest` or `llama.cpp/<model id>`; `text` = the chat model answers in text |
+| `screenThreshold` | `PI_BRIDGE_SCREEN_THRESHOLD` | 0.3 | Below this probability of "meant for the assistant" the text counts as background noise |
+| `timezone` | `PI_BRIDGE_TIMEZONE` | Home Assistant's | Time zone of the time line, the notes and wake-ups, e.g. `Europe/Copenhagen` (independent of the host's, which is often UTC) |
+| `memory` | `PI_BRIDGE_MEMORY` | true | Short-term memory note and the time in front of messages |
+| `memoryFile` | `PI_BRIDGE_MEMORY_FILE` | `<cwd>/short-term-memory.md` | Where the note is kept |
+| `summaryAfterMinutes` | `PI_BRIDGE_SUMMARY_AFTER_MIN` | 1 | A conversation this long quiet is summarized into the note |
+| `memoryKeepDays` | `PI_BRIDGE_MEMORY_KEEP_DAYS` | 3 | Past dates stay in the note's calendar this many days |
+| `wakeups` | `PI_BRIDGE_WAKEUPS` | true | The wake-up tools |
 | `autostart` | `PI_BRIDGE_AUTOSTART` | false | Start with interactive pi |
 | – | `HA_TOKEN` | – | Docker: a Home Assistant long-lived access token, for an MCP server entry in pi's `~/.pi/agent/mcp.json` (`"headers": {"Authorization": "Bearer ${HA_TOKEN}"}`), so the token stays out of prompts |
 

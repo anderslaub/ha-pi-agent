@@ -25,6 +25,8 @@ export interface ToolCall {
 export class TurnTiming {
   private readonly t0 = Date.now();
   session_ready?: number;
+  /** noise screening finished (screen.ts), when the turn was screened */
+  screened?: number;
   first_text?: number;
   detached?: number;
   done?: number;
@@ -89,6 +91,7 @@ export class TurnTiming {
     }
     return {
       session_ready: this.session_ready,
+      screened: this.screened,
       first_text: this.first_text,
       text_pieces: this.sent.length,
       longest_text_gap: gap,

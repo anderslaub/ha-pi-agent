@@ -22,6 +22,8 @@ from .const import (
     DEFAULT_OPTIONS,
     DOMAIN,
     EVENT_TASK_FINISHED,
+    EVENT_WAKEUP,
+    SATELLITE_START_CONVERSATION,
     READY_CHECK_SECONDS,
     TASK_CHECK_SECONDS,
 )
@@ -42,6 +44,9 @@ class PiAgentData:
     tasks: dict[str, dict[str, Any]] = field(default_factory=dict)
     # task ids whose result was delivered (by the event stream or the status check), so it is never announced twice
     delivered: list[str] = field(default_factory=list)
+    # noise filter: conversation_id -> {"at": monotonic time, "heard": text, "said": remark} after a remark about
+    # background noise, so the answer to it is screened too
+    noise: dict[str, dict[str, Any]] = field(default_factory=dict)
 
 
 type PiAgentConfigEntry = ConfigEntry[PiAgentData]
@@ -98,6 +103,8 @@ async def _async_listen_for_tasks(
                     last_id = event["last_id"]
                 if event.get("t") in ("task_done", "task_failed"):
                     hass.async_create_task(_async_deliver(hass, entry, event))
+                elif event.get("t") == "wakeup":
+                    hass.async_create_task(_async_wakeup(hass, entry, event))
         except BridgeAuthError:
             _LOGGER.error("The pi bridge rejected the token; background results are not delivered")
             entry.async_start_reauth(hass)
@@ -211,36 +218,84 @@ async def _async_deliver(
     options = {**DEFAULT_OPTIONS, **entry.options}
     if not options[CONF_ANNOUNCE]:
         return
-    if satellite and hass.states.get(satellite) is not None:
-        data: dict[str, Any] = {"message": text, "preannounce": False}
-        # Speak with the voice of the assistant that uses pi; otherwise the satellite would use the voice of
-        # whichever assistant it has selected
-        agent_ids = {entry.entry_id} | ({entry.runtime_data.agent_entity_id} - {None})
-        pipeline = None
-        try:
-            if (pipeline := pi_pipeline(hass, agent_ids)) is not None:
-                if media_id := tts_media_id(hass, pipeline, text):
-                    data["media_id"] = media_id
-        except Exception:  # noqa: BLE001 - fall back to the satellite's own voice
-            _LOGGER.warning("Could not prepare the announcement in pi's voice", exc_info=True)
-        debug.log(
-            hass,
-            entry,
-            f"Announcing on {satellite}"
-            + (f" with the voice of assistant '{pipeline.name}'" if "media_id" in data and pipeline else "")
-            + f": {text}",
-            logbook=False,
+    if await _async_speak(hass, entry, satellite, text):
+        return
+    persistent_notification.async_create(hass, text, title=entry.title)
+
+
+async def _async_speak(
+    hass: HomeAssistant,
+    entry: PiAgentConfigEntry,
+    satellite: str | None,
+    text: str,
+    listen_context: str | None = None,
+) -> bool:
+    """Say the text on the satellite in the voice of the assistant that uses pi. With listen_context, listen for an
+    answer afterwards (start a conversation; the context goes to pi as an extra instruction). False when it could
+    not be spoken."""
+    if not satellite or (state := hass.states.get(satellite)) is None:
+        return False
+    data: dict[str, Any] = {"preannounce": False}
+    # Speak with the voice of the assistant that uses pi; otherwise the satellite would use the voice of whichever
+    # assistant it has selected
+    agent_ids = {entry.entry_id} | ({entry.runtime_data.agent_entity_id} - {None})
+    pipeline = None
+    media_id = None
+    try:
+        if (pipeline := pi_pipeline(hass, agent_ids)) is not None:
+            media_id = tts_media_id(hass, pipeline, text)
+    except Exception:  # noqa: BLE001 - fall back to the satellite's own voice
+        _LOGGER.warning("Could not prepare the announcement in pi's voice", exc_info=True)
+    listen = listen_context is not None and bool(
+        int(state.attributes.get("supported_features", 0)) & SATELLITE_START_CONVERSATION
+    )
+    if listen:
+        service = "start_conversation"
+        data["start_message"] = text
+        data["extra_system_prompt"] = listen_context
+        if media_id:
+            data["start_media_id"] = media_id
+    else:
+        service = "announce"
+        data["message"] = text
+        if media_id:
+            data["media_id"] = media_id
+    debug.log(
+        hass,
+        entry,
+        f"{'Asking' if listen else 'Announcing'} on {satellite}"
+        + (f" with the voice of assistant '{pipeline.name}'" if media_id and pipeline else "")
+        + f": {text}",
+        logbook=False,
+    )
+    try:
+        await hass.services.async_call(
+            "assist_satellite", service, data, target={"entity_id": satellite}, blocking=True
         )
-        try:
-            await hass.services.async_call(
-                "assist_satellite",
-                "announce",
-                data,
-                target={"entity_id": satellite},
-                blocking=True,
-            )
-        except Exception:  # noqa: BLE001 - fall back to a notification whatever went wrong
-            _LOGGER.warning("Could not announce on %s", satellite, exc_info=True)
-        else:
-            return
+    except Exception:  # noqa: BLE001 - the caller falls back to a notification
+        _LOGGER.warning("Could not %s on %s", service, satellite, exc_info=True)
+        return False
+    return True
+
+
+async def _async_wakeup(hass: HomeAssistant, entry: PiAgentConfigEntry, event: dict[str, Any]) -> None:
+    """pi speaks up by itself at a time it set (wakeup_set): on the satellite it was set on, listening for an answer
+    when it asks a question, else as a notification."""
+    text = str(event.get("text") or event.get("note") or "").strip()
+    if not text:
+        return
+    satellite = event.get("satellite_id")
+    hass.bus.async_fire(
+        EVENT_WAKEUP,
+        {"text": text, "note": event.get("note"), "satellite_id": satellite, "device_id": event.get("device_id")},
+    )
+    debug.log(hass, entry, f"Wake-up ({satellite or event.get('device_id') or 'no device'}): {text}")
+    context = None
+    if text.endswith("?"):
+        context = (
+            f"You just spoke up by yourself, at a time you had set (your note: {event.get('note')}), "
+            f"and said: {text}"
+        )
+    if await _async_speak(hass, entry, satellite, text, context):
+        return
     persistent_notification.async_create(hass, text, title=entry.title)

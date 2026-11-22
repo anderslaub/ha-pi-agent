@@ -14,6 +14,7 @@ CONF_BUSY_MESSAGE: Final = "busy_message"
 CONF_FAILED_MESSAGE: Final = "failed_message"
 CONF_WORKSPACE: Final = "workspace"
 CONF_DEBUG: Final = "debug"
+CONF_NOISE_FILTER: Final = "noise_filter"
 
 SESSION_PER_CONVERSATION: Final = "per_conversation"
 SESSION_PER_DEVICE: Final = "per_device"
@@ -29,10 +30,15 @@ DEFAULT_OPTIONS: Final = {
     CONF_FAILED_MESSAGE: "Sorry, I couldn't finish that task.",
     CONF_WORKSPACE: "",
     CONF_DEBUG: False,
+    CONF_NOISE_FILTER: True,
 }
 
 EVENT_TASK_STARTED: Final = "pi_agent_task_started"
 EVENT_TASK_FINISHED: Final = "pi_agent_task_finished"
+EVENT_WAKEUP: Final = "pi_agent_wakeup"
+
+# assist_satellite's AssistSatelliteEntityFeature.START_CONVERSATION (importing it would load the TTS stack early)
+SATELLITE_START_CONVERSATION: Final = 2
 
 # While a background task runs, ask the bridge this often whether it is still going (a lost task must not
 # leave a voice satellite showing "working" for good)
@@ -40,3 +46,6 @@ TASK_CHECK_SECONDS = 180
 # How often to ask the bridge whether the assistant is ready (model loaded, warm-up done), for the "loading"
 # face on voice satellites. While loading, the satellites get a refresh every time.
 READY_CHECK_SECONDS = 10
+# Noise filter: after a remark about background noise, the next text in that conversation within this time is the
+# answer to it (noise again ends the conversation quietly)
+NOISE_RETRY_SECONDS = 120

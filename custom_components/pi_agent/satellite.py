@@ -17,6 +17,8 @@ _LOGGER = logging.getLogger(__name__)
 WORKING_ACTION = "pi_agent_working"
 # ... and this one (variables: loading: bool) to show that the assistant is still starting up.
 LOADING_ACTION = "pi_agent_loading"
+# ... and this one (no variables) to end the conversation quietly: the noise filter decided it was the TV talking.
+DISMISS_ACTION = "pi_agent_dismiss"
 
 
 def _device_id(hass: HomeAssistant, satellite_id: str | None, device_id: str | None) -> str | None:
@@ -29,6 +31,13 @@ def esphome_working_service(
     hass: HomeAssistant, satellite_id: str | None, device_id: str | None
 ) -> str | None:
     """The satellite's esphome.<node>_pi_agent_working action, if its firmware has one."""
+    return esphome_service(hass, satellite_id, device_id, WORKING_ACTION)
+
+
+def esphome_service(
+    hass: HomeAssistant, satellite_id: str | None, device_id: str | None, action: str
+) -> str | None:
+    """The satellite's esphome.<node>_<action> action, if its firmware has one."""
     if not (dev_id := _device_id(hass, satellite_id, device_id)):
         return None
     if not (device := dr.async_get(hass).async_get(dev_id)):
@@ -41,7 +50,7 @@ def esphome_working_service(
         name = getattr(info, "name", None) or entry.data.get("device_name")
         if not name:
             continue
-        service = f"{name.replace('-', '_')}_{WORKING_ACTION}"
+        service = f"{name.replace('-', '_')}_{action}"
         if hass.services.has_service("esphome", service):
             return service
     return None
@@ -56,6 +65,18 @@ async def async_set_working(
     try:
         await hass.services.async_call("esphome", service, {"working": working}, blocking=True)
     except Exception:  # noqa: BLE001 - a face that does not update must never break the conversation
+        _LOGGER.warning("Could not call esphome.%s", service, exc_info=True)
+        return None
+    return service
+
+
+async def async_dismiss(hass: HomeAssistant, satellite_id: str | None, device_id: str | None) -> str | None:
+    """Tell the satellite to end the conversation quietly (no more listening). Returns the action used."""
+    if not (service := esphome_service(hass, satellite_id, device_id, DISMISS_ACTION)):
+        return None
+    try:
+        await hass.services.async_call("esphome", service, {}, blocking=True)
+    except Exception:  # noqa: BLE001
         _LOGGER.warning("Could not call esphome.%s", service, exc_info=True)
         return None
     return service

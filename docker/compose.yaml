@@ -39,6 +39,18 @@ services:
       PI_BRIDGE_BUDGET_S: ${PI_BRIDGE_BUDGET_S:-15}
       PI_BRIDGE_TASK_TIMEOUT_MIN: ${PI_BRIDGE_TASK_TIMEOUT_MIN:-10}
       PI_BRIDGE_WARMUP: ${PI_BRIDGE_WARMUP:-1}
+      # Noise filter (README "Noise filter"), optional: with a TypeSafe API key Jev (typesafe/jev-latest) decides;
+      # without one (and no PI_BRIDGE_SCREEN_MODEL) nothing is screened
+      PI_BRIDGE_SCREEN_MODEL: ${PI_BRIDGE_SCREEN_MODEL:-}
+      PI_BRIDGE_SCREEN_THRESHOLD: ${PI_BRIDGE_SCREEN_THRESHOLD:-0.3}
+      TYPESAFE_API_KEY: ${TYPESAFE_API_KEY:-}
+      # Sense of time, short-term memory, wake-ups (README "Sense of time, short-term memory and wake-ups")
+      # Empty: Home Assistant's time zone
+      PI_BRIDGE_TIMEZONE: ${PI_BRIDGE_TIMEZONE:-}
+      PI_BRIDGE_MEMORY: ${PI_BRIDGE_MEMORY:-1}
+      PI_BRIDGE_SUMMARY_AFTER_MIN: ${PI_BRIDGE_SUMMARY_AFTER_MIN:-1}
+      PI_BRIDGE_MEMORY_KEEP_DAYS: ${PI_BRIDGE_MEMORY_KEEP_DAYS:-3}
+      PI_BRIDGE_WAKEUPS: ${PI_BRIDGE_WAKEUPS:-1}
       # Long-lived Home Assistant access token, for pi's mcp.json ("Authorization": "Bearer ${HA_TOKEN}"):
       # keeps the token out of prompts and config files
       HA_TOKEN: ${HA_TOKEN:-}

@@ -21,6 +21,7 @@ from .const import (
     CONF_BUDGET,
     CONF_BUSY_MESSAGE,
     CONF_DETACH_MESSAGE,
+    CONF_NOISE_FILTER,
     CONF_PROMPT,
     CONF_RESET_HOURS,
     CONF_SESSION_MODE,
@@ -28,9 +29,10 @@ from .const import (
     DEFAULT_OPTIONS,
     DOMAIN,
     EVENT_TASK_STARTED,
+    NOISE_RETRY_SECONDS,
     SESSION_PER_DEVICE,
 )
-from .satellite import async_set_working
+from .satellite import async_dismiss, async_set_working
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -105,6 +107,8 @@ class PiAgentConversationEntity(
             "budget_s": options[CONF_BUDGET],
             "detach_message": options[CONF_DETACH_MESSAGE],
             "busy_message": options[CONF_BUSY_MESSAGE],
+            # the assistant's sense of time (the bridge host often runs UTC)
+            "time_zone": self.hass.config.time_zone,
         }
         if options[CONF_SESSION_MODE] == SESSION_PER_DEVICE:
             # One long-running pi session per device, started fresh after a quiet period
@@ -115,7 +119,32 @@ class PiAgentConversationEntity(
             request["session_key"] = f"conversation:{chat_log.conversation_id}"
         if workspace := options[CONF_WORKSPACE]:
             request["cwd"] = workspace
+        if options[CONF_NOISE_FILTER]:
+            self._add_screening(request, user_input, chat_log)
         return request
+
+    def _add_screening(
+        self,
+        request: dict[str, Any],
+        user_input: conversation.ConversationInput,
+        chat_log: conversation.ChatLog,
+    ) -> None:
+        """Noise filter (voice devices only): have the bridge check whether the text was meant for the assistant.
+
+        Screened are the first text of a conversation (the voice device starts a new conversation per wake word)
+        and the answer to a remark about background noise. Follow-ups of a real conversation are not.
+        """
+        if not (user_input.satellite_id or user_input.device_id):
+            return
+        noise = self.entry.runtime_data.noise
+        now = time.monotonic()
+        for conv_id in [c for c, n in noise.items() if now - n["at"] > NOISE_RETRY_SECONDS]:
+            del noise[conv_id]
+        if previous := noise.pop(chat_log.conversation_id, None):
+            request["screen"] = "retry"
+            request["screen_previous"] = {"heard": previous["heard"], "said": previous["said"]}
+        elif not any(isinstance(c, conversation.AssistantContent) for c in chat_log.content):
+            request["screen"] = "first"
 
     async def _async_handle_message(
         self,
@@ -131,6 +160,8 @@ class PiAgentConversationEntity(
 
         source = user_input.satellite_id or user_input.device_id or "text"
         debug.log(self.hass, self.entry, f"Heard ({source}): {user_input.text}")
+        if request.get("screen"):
+            debug.log(self.hass, self.entry, f"Noise check ({source}): {request['screen']}", logbook=False)
         turn = _Turn()
         try:
             async for _content in chat_log.async_add_delta_content_stream(
@@ -144,6 +175,9 @@ class PiAgentConversationEntity(
         finally:
             if turn.tools:
                 debug.log(self.hass, self.entry, f"pi used ({source}): {'; '.join(turn.tools)}", logbook=False)
+
+        if turn.screened:
+            return await self._screened_result(user_input, chat_log, turn, source)
 
         if debug.enabled(self.entry):
             debug.log(self.hass, self.entry, f"Timing ({source}): {debug.timing_summary(turn.timeline())}")
@@ -163,6 +197,43 @@ class PiAgentConversationEntity(
             return _error_result(user_input, chat_log, "Sorry, pi did not answer.")
         return conversation.async_get_result_from_chat_log(user_input, chat_log)
 
+    async def _screened_result(
+        self,
+        user_input: conversation.ConversationInput,
+        chat_log: conversation.ChatLog,
+        turn: _Turn,
+        source: str,
+    ) -> conversation.ConversationResult:
+        """The text was background noise: say the remark and listen for the answer, or end quietly."""
+        response = intent.IntentResponse(language=user_input.language)
+        remark = "".join(turn.reply).strip()
+        if debug.enabled(self.entry):
+            debug.log(self.hass, self.entry, f"Timing ({source}): {debug.timing_summary(turn.timeline())}")
+        if turn.screened == "noise":
+            # The next text in this conversation is the answer to the remark: screened too
+            self.entry.runtime_data.noise[chat_log.conversation_id] = {
+                "at": time.monotonic(),
+                "heard": user_input.text,
+                "said": remark,
+            }
+            debug.log(self.hass, self.entry, f"Background noise? ({source}) pi asked: {remark}")
+            response.async_set_speech(remark)
+            return conversation.ConversationResult(
+                response=response, conversation_id=chat_log.conversation_id, continue_conversation=True
+            )
+        # Noise again: stop listening without a word (and end the device's own chat mode, if it has one)
+        used = await async_dismiss(self.hass, user_input.satellite_id, user_input.device_id)
+        debug.log(
+            self.hass,
+            self.entry,
+            f"Background noise again ({source}): conversation ended quietly"
+            f"{f' (esphome.{used})' if used else ''}",
+        )
+        response.async_set_speech("")
+        return conversation.ConversationResult(
+            response=response, conversation_id=chat_log.conversation_id, continue_conversation=False
+        )
+
     async def _transform_stream(
         self,
         client: PiBridgeClient,
@@ -177,6 +248,8 @@ class PiAgentConversationEntity(
             kind = event.get("t")
             if kind in ("done", "detached"):
                 turn.bridge = event.get("timing") or {}
+                if kind == "done" and event.get("screened"):
+                    turn.screened = str(event["screened"])
             if kind == "text":
                 if text := event.get("d"):
                     spoke = spoke or bool(text.strip())
@@ -225,6 +298,8 @@ class _Turn:
         self.reply: list[str] = []
         self.tools: list[str] = []
         self.detached = False
+        # noise filter verdict from the bridge: "noise" (a remark was made) or "dismiss" (end quietly)
+        self.screened: str | None = None
         # (seconds since the request, text) as each piece arrived from the bridge
         self.texts: list[tuple[float, str]] = []
         # the bridge's own timing (ms since it got the request), from its done/detached event

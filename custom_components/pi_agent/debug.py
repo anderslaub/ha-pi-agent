@@ -56,6 +56,8 @@ def timing_summary(timeline: dict[str, Any]) -> str:
         parts.append("no text")
     if (ready := bridge.get("session_ready")) is not None and ready > 200:
         parts.append(f"session start {_s(ready)}")
+    if (screened := bridge.get("screened")) is not None:
+        parts.append(f"noise check {_s(screened - (bridge.get('session_ready') or 0))}")
     for i, call in enumerate(bridge.get("llm") or [], 1):
         parts.append(
             f"model call {i}: start {_s(call.get('start'))}, first token {_s(call.get('first_token'))}, "

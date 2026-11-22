@@ -21,6 +21,28 @@ export interface BridgeConfig {
   taskTimeoutMinutes: number;
   /** run one throwaway turn at startup, so the model server has the long prompt cached before the first question */
   warmup: boolean;
+  /**
+   * Noise screening (screen.ts): the classifier model that judges whether speech was meant for the assistant,
+   * e.g. a typesafe decision model on the llama.cpp router. Default: the chat model itself.
+   */
+  screenModel?: string;
+  /** below this probability of "meant for the assistant" the speech counts as background noise */
+  screenThreshold: number;
+  /**
+   * IANA time zone for the assistant's sense of time (the time, dates in its notes, wake-ups). Unset: Home
+   * Assistant's time zone (sent with each turn), else the host's.
+   */
+  timezone?: string;
+  /** short-term memory: a note about recent conversations, rewritten after each one (memory.ts) */
+  memory: boolean;
+  /** where that note is kept */
+  memoryFile: string;
+  /** a conversation counts as over after this long without a message, and is then summarized */
+  summaryAfterMinutes: number;
+  /** past dates stay in the note's mini calendar this many days */
+  memoryKeepDays: number;
+  /** the wake-up tools (wakeups.ts) */
+  wakeups: boolean;
   /** extension only: start the bridge when an interactive pi starts */
   autostart: boolean;
 }
@@ -38,6 +60,14 @@ export interface ConfigFile {
   budgetSeconds?: number;
   taskTimeoutMinutes?: number;
   warmup?: boolean;
+  screenModel?: string;
+  screenThreshold?: number;
+  timezone?: string;
+  memory?: boolean;
+  memoryFile?: string;
+  summaryAfterMinutes?: number;
+  memoryKeepDays?: number;
+  wakeups?: boolean;
   autostart?: boolean;
 }
 
@@ -76,11 +106,12 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, file = configPa
         "to a random string of at least 16 characters.",
     );
   }
+  const cwd = expandHome(env.PI_BRIDGE_CWD || f.cwd || DEFAULT_CWD);
   return {
     host: env.PI_BRIDGE_HOST || f.host || "0.0.0.0",
     port: Number(env.PI_BRIDGE_PORT || f.port || 8787),
     token,
-    cwd: expandHome(env.PI_BRIDGE_CWD || f.cwd || DEFAULT_CWD),
+    cwd,
     model: env.PI_BRIDGE_MODEL || f.model || undefined,
     thinking: env.PI_BRIDGE_THINKING || f.thinking || undefined,
     tools: list(env.PI_BRIDGE_TOOLS || f.tools),
@@ -88,6 +119,15 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, file = configPa
     defaultBudgetS: Number(env.PI_BRIDGE_BUDGET_S || f.budgetSeconds || 15),
     taskTimeoutMinutes: Number(env.PI_BRIDGE_TASK_TIMEOUT_MIN || f.taskTimeoutMinutes || 10),
     warmup: env.PI_BRIDGE_WARMUP ? env.PI_BRIDGE_WARMUP !== "0" : f.warmup !== false,
+    screenModel: env.PI_BRIDGE_SCREEN_MODEL || f.screenModel || undefined,
+    screenThreshold: Number(env.PI_BRIDGE_SCREEN_THRESHOLD || f.screenThreshold || 0.3),
+    timezone: env.PI_BRIDGE_TIMEZONE || f.timezone || undefined,
+    memory: env.PI_BRIDGE_MEMORY ? env.PI_BRIDGE_MEMORY !== "0" : f.memory !== false,
+    // in the workspace, so it can be read (and corrected) from the host
+    memoryFile: expandHome(env.PI_BRIDGE_MEMORY_FILE || f.memoryFile || path.join(cwd, "short-term-memory.md")),
+    summaryAfterMinutes: Number(env.PI_BRIDGE_SUMMARY_AFTER_MIN || f.summaryAfterMinutes || 1),
+    memoryKeepDays: Number(env.PI_BRIDGE_MEMORY_KEEP_DAYS || f.memoryKeepDays || 3),
+    wakeups: env.PI_BRIDGE_WAKEUPS ? env.PI_BRIDGE_WAKEUPS !== "0" : f.wakeups !== false,
     autostart: env.PI_BRIDGE_AUTOSTART ? env.PI_BRIDGE_AUTOSTART === "1" : Boolean(f.autostart),
   };
 }

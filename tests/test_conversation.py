@@ -12,8 +12,8 @@ from custom_components.pi_agent.const import CONF_SESSION_MODE, EVENT_TASK_FINIS
 AGENT = "conversation.pi_agent"
 
 
-async def _say(hass, text, **kwargs):
-    return await conversation.async_converse(hass, text, None, Context(), agent_id=AGENT, **kwargs)
+async def _say(hass, text, conversation_id=None, **kwargs):
+    return await conversation.async_converse(hass, text, conversation_id, Context(), agent_id=AGENT, **kwargs)
 
 
 async def test_streamed_reply(hass: HomeAssistant, bridge, setup_entry) -> None:
@@ -33,6 +33,7 @@ async def test_streamed_reply(hass: HomeAssistant, bridge, setup_entry) -> None:
     assert sent["device_id"] == "dev1"
     assert sent["session_key"] == f"conversation:{result.conversation_id}"
     assert sent["budget_s"] == 15
+    assert sent["time_zone"] == hass.config.time_zone
 
 
 async def test_session_per_device(hass: HomeAssistant, bridge, setup_entry) -> None:
@@ -246,3 +247,82 @@ async def test_loading_face_while_the_assistant_starts_up(
     assert sum(1 for c in calls if c.data == {"loading": False}) == 1
     await hass.config_entries.async_unload(entry.entry_id)
     await hass.async_block_till_done()
+
+
+async def test_noise_filter_remark_then_quiet_end(hass: HomeAssistant, bridge, setup_entry) -> None:
+    """TV after a false wake-up: a remark that keeps listening, then noise again ends quietly on the device."""
+    from homeassistant.helpers import device_registry as dr
+    from pytest_homeassistant_custom_component.common import MockConfigEntry
+
+    esphome_entry = MockConfigEntry(domain="esphome", data={"device_name": "kattio-box-1"})
+    esphome_entry.add_to_hass(hass)
+    device = dr.async_get(hass).async_get_or_create(
+        config_entry_id=esphome_entry.entry_id, identifiers={("esphome", "kattio")}
+    )
+    dismiss = async_mock_service(hass, "esphome", "kattio_box_1_pi_agent_dismiss")
+
+    # the first text of a conversation from a voice device is screened
+    bridge.script = [{"t": "text", "d": "Riveting news. Was that for me?"}, {"t": "done", "screened": "noise"}]
+    first = await _say(hass, "and the weather in Oslo", device_id=device.id)
+    assert bridge.turns[-1]["screen"] == "first"
+    assert first.response.speech["plain"]["speech"] == "Riveting news. Was that for me?"
+    assert first.continue_conversation is True
+
+    # the answer to the remark is screened as a retry, with what came before
+    bridge.script = [{"t": "done", "screened": "dismiss"}]
+    second = await _say(hass, "buy now for only", device_id=device.id, conversation_id=first.conversation_id)
+    sent = bridge.turns[-1]
+    assert sent["screen"] == "retry"
+    assert sent["screen_previous"] == {"heard": "and the weather in Oslo", "said": "Riveting news. Was that for me?"}
+    assert second.response.speech["plain"]["speech"] == ""
+    assert second.continue_conversation is False
+    assert len(dismiss) == 1
+
+
+async def test_noise_filter_skips_follow_ups_and_text_chat(hass: HomeAssistant, bridge, setup_entry) -> None:
+    bridge.script = [{"t": "text", "d": "Sure. Anything else?"}, {"t": "done"}]
+    first = await _say(hass, "turn on the light", device_id="dev1")
+    assert bridge.turns[-1]["screen"] == "first"
+    # a follow-up in the same conversation is a real conversation: not screened
+    await _say(hass, "and the kitchen", device_id="dev1", conversation_id=first.conversation_id)
+    assert "screen" not in bridge.turns[-1]
+    # typed text (no voice device) is never screened
+    await _say(hass, "hello")
+    assert "screen" not in bridge.turns[-1]
+    # and the option switches it off
+    hass.config_entries.async_update_entry(setup_entry, options={**setup_entry.options, "noise_filter": False})
+    await _say(hass, "hi", device_id="dev2")
+    assert "screen" not in bridge.turns[-1]
+
+
+async def test_wakeup_asks_and_listens_or_announces(hass: HomeAssistant, bridge, setup_entry) -> None:
+    """A wake-up pi set is spoken on its satellite; a question starts a conversation that listens for the answer."""
+    from custom_components.pi_agent.const import EVENT_WAKEUP, SATELLITE_START_CONVERSATION
+
+    start = async_mock_service(hass, "assist_satellite", "start_conversation")
+    announce = async_mock_service(hass, "assist_satellite", "announce")
+    fired = async_capture_events(hass, EVENT_WAKEUP)
+    satellite = "assist_satellite.kattio_box_1"
+    hass.states.async_set(
+        satellite, "idle", {"supported_features": SATELLITE_START_CONVERSATION}
+    )
+
+    async def wait_for(calls):
+        for _ in range(50):
+            await asyncio.sleep(0.05)
+            await hass.async_block_till_done()
+            if calls:
+                return
+
+    await bridge.events.put(
+        {"t": "wakeup", "id": 1, "satellite_id": satellite, "note": "ask about the concert", "text": "How was the concert?"}
+    )
+    await wait_for(start)
+    assert start[0].data["start_message"] == "How was the concert?"
+    assert "ask about the concert" in start[0].data["extra_system_prompt"]
+    assert fired[0].data["text"] == "How was the concert?"
+
+    await bridge.events.put({"t": "wakeup", "id": 2, "satellite_id": satellite, "text": "Time for the dentist."})
+    await wait_for(announce)
+    assert announce[0].data["message"] == "Time for the dentist."
+    assert len(start) == 1
