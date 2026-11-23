@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { classifierContext, cleanRemark, parseVerdict, remarkPrompt, screenMessage, screenPrompt, withScreenContext } from "../src/screen.ts";
+import { classifierContext, cleanRemark, interruptContext, interruptionNote, parseVerdict, remarkPrompt, screenMessage, screenPrompt, withScreenContext } from "../src/screen.ts";
 
 test("verdict: TALK, NOISE with a remark, and anything unclear counts as TALK", () => {
   assert.deepEqual(parseVerdict("TALK", "first"), { verdict: "talk" });
@@ -43,4 +43,26 @@ test("classifier question: true means meant for the assistant; retry carries the
   assert.match(remarkPrompt({ stage: "first", text: "x", language: "da", persona: "A cat." }), /"da"[\s\S]*A cat\./);
   assert.equal(cleanRemark('"Gripping stuff.\nFor me?"'), "Gripping stuff. For me?");
   assert.equal(cleanRemark("  "), undefined);
+});
+
+test("turn check asks whether the speaker is done, with the label and the silence", async () => {
+  const { completeContext } = await import("../src/screen.ts");
+  const c = completeContext("[Anders] turn on the light in the", 450);
+  assert.equal(c.state.heard_so_far, "[Anders] turn on the light in the");
+  assert.equal(c.state.silence_since_last_word_ms, "450");
+  assert.equal(c.questions.complete.type, "bool");
+});
+
+test("interruptContext asks one bool question and keeps the end of the reply", () => {
+  const c = interruptContext("[Ellie] no wait, the other one", "x".repeat(1000) + " the kitchen light is on");
+  assert.deepEqual(Object.keys(c.questions), ["interrupt"]);
+  assert.ok(String(c.state.assistant_was_saying).endsWith("the kitchen light is on"));
+  assert.ok(String(c.state.assistant_was_saying).length <= 600);
+});
+
+test("interruptionNote says where the answer was cut off", () => {
+  const n = interruptionNote({ who: "Ellie", text: "no, the bedroom", heard_part: "I turned on the kitchen" });
+  assert.match(n, /Ellie interrupted/);
+  assert.match(n, /the kitchen"/);
+  assert.match(n, /no, the bedroom/);
 });

@@ -15,6 +15,7 @@
  * When in doubt the text counts as meant for the assistant, and any failure lets the turn through.
  */
 import type { ClassifierContext } from "@earendil-works/pi-ai";
+import { stripLabels } from "./voices.ts";
 
 export type ScreenStage = "first" | "retry";
 
@@ -96,6 +97,71 @@ export function classifierContext(input: ScreenInput): ClassifierContext {
   };
 }
 
+// ---------------------------------------------------------------------------------------------- turn end
+
+/**
+ * "Has the speaker finished?" for turn detection (a turn detection service asks while the satellite still listens): the text the
+ * speaker said so far (with its voice label) and how long they have been quiet. Jev judges the sentence; the
+ * timing stays with the caller (it waits longer when the answer is no).
+ */
+export function completeContext(text: string, silenceMs: number): ClassifierContext {
+  return {
+    state: {
+      situation: flat(`A voice assistant is listening to someone talking to it. Speech-to-text so far, labelled with
+who spoke ([Name] for a known voice, [unknown voice] otherwise). Decide whether to answer now or keep listening.`),
+      heard_so_far: text,
+      silence_since_last_word_ms: String(silenceMs),
+    },
+    questions: {
+      complete: {
+        type: "bool",
+        instructions: "Has the speaker finished what they wanted to say, so the assistant should answer now?",
+        criteria: {
+          true: "The request, question or sentence is complete.",
+          false: "They are mid-sentence, hesitating, listing, or the request is not complete yet: wait.",
+        },
+      },
+    },
+  };
+}
+
+/**
+ * "Was that meant as an interruption?" for a turn detection service: someone the assistant knows spoke while it
+ * was talking (full-duplex satellite). What they said (with their voice label) and what the assistant was saying.
+ */
+export function interruptContext(text: string, assistantSaid: string): ClassifierContext {
+  return {
+    state: {
+      situation: flat(`A voice assistant is talking (its reply is below). While it talks, a person in the room
+said something (speech-to-text, labelled with who spoke). Decide whether they want the assistant to stop and
+listen to them now.`),
+      assistant_was_saying: assistantSaid.slice(-600) || "(unknown)",
+      person_said: text,
+    },
+    questions: {
+      interrupt: {
+        type: "bool",
+        instructions: "Is the person interrupting the assistant: talking to it, correcting it, or asking it to stop?",
+        criteria: {
+          true: "They talk to the assistant: a correction, a new request, a question, 'stop', 'wait', 'no'.",
+          false: "Background talk, talking to someone else, laughing, singing along, or reacting without wanting to interrupt.",
+        },
+      },
+    },
+  };
+}
+
+/** The note in front of the next request after an interruption, so the assistant knows where it was cut off */
+export function interruptionNote(n: { who?: string; text: string; heard_part?: string }): string {
+  const heard = n.heard_part?.trim();
+  const who = n.who ? `${n.who}` : "Someone";
+  return (
+    `[System: ${who} interrupted your previous answer` +
+    (heard ? ` after you had said: "${heard.slice(-300)}"` : "") +
+    `. They said: "${n.text.trim()}". What follows is the rest of what they said (it may continue that).]`
+  );
+}
+
 // ---------------------------------------------------------------------------------------------- remark
 
 /** System prompt for the chat model: one sarcastic remark about what was heard */
@@ -112,7 +178,8 @@ for you.${lang} It is read aloud: plain words, no emojis, no quotes, at most two
 }
 
 export function remarkMessage(input: ScreenInput): string {
-  return `Heard: "${input.text}"`;
+  // spoken aloud: the words only, not the speaker labels
+  return `Heard: "${stripLabels(input.text)}"`;
 }
 
 /** The remark as the model wrote it, cleaned up for speech */
@@ -123,6 +190,7 @@ export function cleanRemark(text: string): string | undefined {
     .filter(Boolean)
     .join(" ")
     .replace(/^["'“”]+|["'“”]+$/g, "")
+    .replace(/\[[^\]]*\]\s*/g, "") // never speak a speaker label
     .trim();
   return s || undefined;
 }

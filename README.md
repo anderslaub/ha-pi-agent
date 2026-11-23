@@ -211,6 +211,24 @@ is heard (`assist_satellite.start_conversation`). Without a voice device it beco
 fires the `pi_agent_wakeup` event. Wake-ups are kept in `~/.pi/agent/va-bridge-wakeups.json`; one that was due
 while the bridge was down is done up to 30 minutes late.
 
+### Who is speaking (voice labels)
+
+With a speech-to-text that labels who said what (`[Name] ` for a known voice, `[unknown voice <4 hex>] ` for one
+that is not; [wygate](https://github.com/anderslaub/wygate)'s `stt_speakers` endpoints do), pi hears
+`[Anders] tænd lyset [unknown voice 3f2a] og nu til vejret`. Without labels everything works as before.
+
+- The voice that starts the turn is the speaker. Later stretches by voices nobody knows (TV, radio, background)
+  are left out before pi or the noise filter sees them; known voices stay.
+- When the speaker's voice is unknown, pi first asks who is speaking (once per voice per day; "a guest" is fine)
+  and remembers the answer with `voice_learn`. From then on that person's words come labelled with their name,
+  and the short-term memory knows who it talked to.
+- Tools (when `PI_BRIDGE_SPEAKER_ID_URL` points at the speaker recognition service): `voice_learn`,
+  `voice_forget`, `voice_list`. The service needs `GET speakers`, `POST speakers/learn` `{voice, name}` and
+  `POST speakers/forget` `{name}` (details in `bridge/src/voices.ts`).
+
+Use the labelling endpoint only in pi's pipeline: Home Assistant's built-in intents cannot read labels (and with
+"prefer handling commands locally" on, labelled commands go to pi instead of the local intents).
+
 ### Showing that pi is working (ESPHome satellites)
 
 When a task continues in the background, the integration fires `pi_agent_task_started`, and later
@@ -261,6 +279,8 @@ refreshes stop.
 | `summaryAfterMinutes` | `PI_BRIDGE_SUMMARY_AFTER_MIN` | 1 | A conversation this long quiet is summarized into the note |
 | `memoryKeepDays` | `PI_BRIDGE_MEMORY_KEEP_DAYS` | 3 | Past dates stay in the note's calendar this many days |
 | `wakeups` | `PI_BRIDGE_WAKEUPS` | true | The wake-up tools |
+| `speakerIdUrl` | `PI_BRIDGE_SPEAKER_ID_URL` | (none) | Base URL of the speaker recognition service: the voice tools |
+| `speakerIdToken` | `PI_BRIDGE_SPEAKER_ID_TOKEN` | (none) | Bearer token for it, if it has one |
 | `autostart` | `PI_BRIDGE_AUTOSTART` | false | Start with interactive pi |
 | – | `HA_TOKEN` | – | Docker: a Home Assistant long-lived access token, for an MCP server entry in pi's `~/.pi/agent/mcp.json` (`"headers": {"Authorization": "Bearer ${HA_TOKEN}"}`), so the token stays out of prompts |
 
@@ -306,6 +326,19 @@ All requests need `Authorization: Bearer <token>`.
   - `{"t":"error","message":…}`
   - `{"t":"done"}`
 - `POST /v1/abort` takes `{session_key}`.
+- `POST /v1/turn-check` takes `{text, silence_ms}` and returns `{complete: probability}`: has the speaker finished?
+  For a turn detection service, asked while a satellite still listens. Uses the noise filter's classifier (Jev with a
+  TypeSafe key); 404 without one.
+- `POST /v1/interrupt-check` takes `{text, assistant_said}` and returns `{interrupt: probability}`: did someone mean
+  to interrupt the assistant while it talked (full-duplex satellites)? Same classifier; 404 without one.
+- `POST /v1/prepare` takes `{text, turn?}`: a turn detection service thinks the request is complete before Home
+  Assistant has ended the turn. pi starts answering at once (turn 1: in a new conversation; later turns: in the
+  conversation used last, within two minutes), but what it says and every tool call wait. When Home Assistant's request arrives with the same words
+  (one word in ten may differ), that answer is adopted and streams straight away; other words, a request judged
+  as noise, or nothing within 20 s, and it is thrown away: the session is rewound (a new one is deleted).
+- `POST /v1/interruptions` takes `{who?, text, heard_part?}`: a turn detection service says the assistant was
+  interrupted. The next request (within a minute) gets a note in front: who interrupted, what they said, and where
+  the answer was cut off.
 - `GET /v1/tasks/<task_id>` returns `{task_id, state: running|done|failed, seconds, tool?, text?, error?}` (404 if unknown).
 - `GET /v1/events?since=<id>` streams NDJSON `task_done` / `task_failed` events (with
   `satellite_id`, `text`, `error`) and pings every 15 s.

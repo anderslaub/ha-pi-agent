@@ -43,6 +43,14 @@ export interface BridgeConfig {
   memoryKeepDays: number;
   /** the wake-up tools (wakeups.ts) */
   wakeups: boolean;
+  /**
+   * The speaker recognition service (its base URL; the API is in voices.ts) behind a speech-to-text that labels
+   * who is speaking: the voice tools (voice_learn ...) name voices there. Unset: no voice tools; labels in the
+   * text are still used.
+   */
+  speakerIdUrl?: string;
+  /** bearer token for the speaker recognition service, if it has one */
+  speakerIdToken?: string;
   /** extension only: start the bridge when an interactive pi starts */
   autostart: boolean;
 }
@@ -68,6 +76,8 @@ export interface ConfigFile {
   summaryAfterMinutes?: number;
   memoryKeepDays?: number;
   wakeups?: boolean;
+  speakerIdUrl?: string;
+  speakerIdToken?: string;
   autostart?: boolean;
 }
 
@@ -128,6 +138,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, file = configPa
     summaryAfterMinutes: Number(env.PI_BRIDGE_SUMMARY_AFTER_MIN || f.summaryAfterMinutes || 1),
     memoryKeepDays: Number(env.PI_BRIDGE_MEMORY_KEEP_DAYS || f.memoryKeepDays || 3),
     wakeups: env.PI_BRIDGE_WAKEUPS ? env.PI_BRIDGE_WAKEUPS !== "0" : f.wakeups !== false,
+    speakerIdUrl: env.PI_BRIDGE_SPEAKER_ID_URL || f.speakerIdUrl || undefined,
+    speakerIdToken: env.PI_BRIDGE_SPEAKER_ID_TOKEN || f.speakerIdToken || undefined,
     autostart: env.PI_BRIDGE_AUTOSTART ? env.PI_BRIDGE_AUTOSTART === "1" : Boolean(f.autostart),
   };
 }

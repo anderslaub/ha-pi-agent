@@ -51,6 +51,9 @@ services:
       PI_BRIDGE_SUMMARY_AFTER_MIN: ${PI_BRIDGE_SUMMARY_AFTER_MIN:-1}
       PI_BRIDGE_MEMORY_KEEP_DAYS: ${PI_BRIDGE_MEMORY_KEEP_DAYS:-3}
       PI_BRIDGE_WAKEUPS: ${PI_BRIDGE_WAKEUPS:-1}
+      # the speaker recognition service behind a speech-to-text that labels who is speaking (empty: no voice tools)
+      PI_BRIDGE_SPEAKER_ID_URL: ${PI_BRIDGE_SPEAKER_ID_URL:-}
+      PI_BRIDGE_SPEAKER_ID_TOKEN: ${PI_BRIDGE_SPEAKER_ID_TOKEN:-}
       # Long-lived Home Assistant access token, for pi's mcp.json ("Authorization": "Bearer ${HA_TOKEN}"):
       # keeps the token out of prompts and config files
       HA_TOKEN: ${HA_TOKEN:-}

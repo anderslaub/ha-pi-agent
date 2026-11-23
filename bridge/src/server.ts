@@ -44,6 +44,9 @@ import {
   screenMessage,
   screenPrompt,
   withScreenContext,
+  completeContext,
+  interruptContext,
+  interruptionNote,
 } from "./screen.ts";
 import type { ScreenInput, ScreenPrevious, ScreenStage, ScreenVerdict } from "./screen.ts";
 import { SpeechFilter, toSpeech } from "./speech.ts";
@@ -61,6 +64,8 @@ import {
 import { describeWakeup, MAX_LATE_MS, WakeupStore } from "./wakeups.ts";
 import type { Wakeup } from "./wakeups.ts";
 import { TurnTiming } from "./timing.ts";
+import { Gate, sameRequest } from "./speculation.ts";
+import { AskedVoices, filterVoices, LABELS_EXPLAINED, unknownSpeakerNote, VoiceIndexClient } from "./voices.ts";
 
 /**
  * pi's built-in extensions (llama.cpp provider, mcp, tool-search, ...). The pi CLI loads them into every
@@ -70,6 +75,7 @@ import { TurnTiming } from "./timing.ts";
 /** The language and instructions of the last real turn, for the startup warm-up (the prompt must match) */
 const WARMUP_KEY = "__warmup__";
 const WAKEUP_TOOLS = ["wakeup_set", "wakeup_list", "wakeup_cancel"];
+const VOICE_TOOLS = ["voice_learn", "voice_forget", "voice_list"];
 const warmupFile = () => path.join(getAgentDir(), "va-bridge-warmup.json");
 
 let builtins: Promise<InlineExtension[]> | undefined;
@@ -87,7 +93,7 @@ function builtInExtensions(log: Logger): Promise<InlineExtension[]> {
   return builtins;
 }
 
-export const BRIDGE_VERSION = "0.5.0";
+export const BRIDGE_VERSION = "0.7.0";
 
 export interface Logger {
   info(msg: string): void;
@@ -171,6 +177,27 @@ interface Run {
   /** stopped for running longer than taskTimeoutMinutes */
   timedOut?: boolean;
   meta: { conversation_id?: string; device_id?: string | null; satellite_id?: string | null };
+  /** an early answer (POST /v1/prepare): what it says waits here until a request adopts it */
+  buffer?: string[];
+  /** ... and its tool calls wait for this */
+  gate?: Gate;
+}
+
+/** An answer started early (speculation.ts) */
+interface Early {
+  key: string;
+  entry: Entry;
+  text: string;
+  run: Run;
+  /** where the session was before (for the rewind) */
+  leafBefore: string | null;
+  contextSent: boolean;
+  /** a session made for it (the first turn of a conversation) */
+  isNew: boolean;
+  /** pi is done (an error message, or undefined) */
+  done: Promise<string | undefined>;
+  at: number;
+  timer?: NodeJS.Timeout;
 }
 
 interface Entry {
@@ -235,6 +262,14 @@ export class Bridge {
   private reaper: NodeJS.Timeout;
   private ticker: NodeJS.Timeout;
   readonly wakeups: WakeupStore;
+  /** an answer started early on a turn detection service's word (POST /v1/prepare) */
+  private early?: Early;
+  /** the last interruption (from a turn detection service), for the next request within a minute */
+  private interruption?: { who?: string; text: string; heard_part?: string; at: number };
+  /** the speaker recognition service (voice tools), when PI_BRIDGE_SPEAKER_ID_URL is set */
+  private voices?: VoiceIndexClient;
+  /** unknown voices the assistant asked "who is speaking?" lately */
+  private askedVoices = new AskedVoices();
   /** Home Assistant's time zone from the last turn (remembered across restarts in the warm-up file) */
   private haTimeZone?: string;
   /** summaries are written one after the other: each one builds on the note the last one wrote */
@@ -255,6 +290,7 @@ export class Bridge {
       // no turn yet
     }
     this.wakeups = new WakeupStore(path.join(getAgentDir(), "va-bridge-wakeups.json"));
+    if (cfg.speakerIdUrl) this.voices = new VoiceIndexClient(cfg.speakerIdUrl, cfg.speakerIdToken);
     this.ticker = setInterval(() => void this.tickWakeups(), 15_000);
     this.ticker.unref();
   }
@@ -285,6 +321,47 @@ export class Bridge {
       }
     }
     this.entries.clear();
+  }
+
+  /**
+   * Turn detection (for any turn detection service): has the speaker finished? The probability from the noise filter's classifier
+   * (Jev when a TypeSafe key is set); undefined without a classifier.
+   */
+  async turnCheck(text: string, silenceMs: number): Promise<number | undefined> {
+    const p = await this.askClassifier(completeContext(text, silenceMs), "complete");
+    if (p !== undefined) this.log.info(`turn check: ${p.toFixed(2)} complete: "${text.slice(0, 80)}"`);
+    return p;
+  }
+
+  /** Turn detection (full duplex): was what someone said while the assistant talked meant as an interruption? */
+  async interruptCheck(text: string, assistantSaid: string): Promise<number | undefined> {
+    const p = await this.askClassifier(interruptContext(text, assistantSaid), "interrupt");
+    if (p !== undefined) this.log.info(`interrupt check: ${p.toFixed(2)}: "${text.slice(0, 80)}"`);
+    return p;
+  }
+
+  /** An interruption happened (a turn detection service tells): the next request gets a note about it */
+  noteInterruption(n: { who?: string; text: string; heard_part?: string }): void {
+    this.interruption = { ...n, at: Date.now() };
+    this.log.info(`interrupted by ${n.who ?? "someone"}: "${n.text.slice(0, 80)}"`);
+  }
+
+  /** One bool question to the noise filter's classifier (Jev with a TypeSafe key); undefined without one */
+  private async askClassifier(context: ReturnType<typeof completeContext>, question: string): Promise<number | undefined> {
+    const modelRuntime = await this.runtime();
+    const spec = this.cfg.screenModel?.trim();
+    const classifier =
+      spec && spec.includes("/") && spec !== "text"
+        ? await this.screenClassifier(modelRuntime, undefined as never).catch(() => undefined)
+        : modelRuntime.hasConfiguredAuth("typesafe")
+          ? modelRuntime.getModelOfType("classifier", "typesafe", "jev-latest")
+          : undefined;
+    if (!classifier) return undefined;
+    const r = await modelRuntime.classify(classifier, context, { signal: AbortSignal.timeout(3000) });
+    if (r.stopReason !== "stop") throw new Error(r.errorMessage || r.stopReason);
+    const answer = r.answers[question];
+    if (answer?.type !== "bool") throw new Error("the classifier gave no answer");
+    return answer.probability;
   }
 
   async health(): Promise<Record<string, unknown>> {
@@ -418,6 +495,22 @@ export class Bridge {
           ...(this.cfg.wakeups
             ? [{ name: "va-bridge-wakeups", hidden: true, factory: (pi: any) => this.registerWakeupTools(pi, holder) }]
             : []),
+          ...(this.voices
+            ? [{ name: "va-bridge-voices", hidden: true, factory: (pi: any) => this.registerVoiceTools(pi) }]
+            : []),
+          {
+            // an early answer (POST /v1/prepare) does nothing until a request adopts it: its tool calls wait
+            name: "va-bridge-early",
+            hidden: true,
+            factory: (pi: any) => {
+              pi.on("tool_call", async () => {
+                const gate = holder.entry?.run?.gate;
+                if (gate && !(await gate.opened)) {
+                  return { block: true, reason: "this early answer was thrown away", terminate: true };
+                }
+              });
+            },
+          },
         ],
       },
     });
@@ -436,7 +529,9 @@ export class Bridge {
       ...(model ? { model } : {}),
       ...(thinkingLevel ? { thinkingLevel } : {}),
       // a restricted tool list (PI_BRIDGE_TOOLS) still gets the bridge's own tools
-      ...(this.cfg.tools ? { tools: [...this.cfg.tools, ...(this.cfg.wakeups ? WAKEUP_TOOLS : [])] } : {}),
+      ...(this.cfg.tools
+        ? { tools: [...this.cfg.tools, ...(this.cfg.wakeups ? WAKEUP_TOOLS : []), ...(this.voices ? VOICE_TOOLS : [])] }
+        : {}),
     });
     await session.bindExtensions({
       mode: "print",
@@ -619,6 +714,86 @@ ${text}`;
     });
   }
 
+  // ------------------------------------------------------------------------------------------ voices
+
+  private registerVoiceTools(pi: any): void {
+    const voices = this.voices!;
+    const text = (t: string) => ({ content: [{ type: "text", text: t }], details: {} });
+    pi.registerTool({
+      name: "voice_learn",
+      label: "Remember a voice",
+      description:
+        `${LABELS_EXPLAINED} When someone tells you who they are (or who is speaking), remember their voice: ` +
+        'the voice id from the label (e.g. "3f2a" from [unknown voice 3f2a]) and their name. Next time their ' +
+        "words come labelled with the name. Also to rename a known voice (voice = the old name).",
+      promptSnippet: "Remember who a voice belongs to ([unknown voice 3f2a] -> a name)",
+      parameters: {
+        type: "object",
+        properties: {
+          voice: { type: "string", description: 'The voice id from the label, e.g. "3f2a"' },
+          name: { type: "string", description: "Who it is, as you want to call them" },
+        },
+        required: ["voice", "name"],
+      },
+      execute: async (_id: string, params: { voice: string; name: string }) => {
+        try {
+          const r = await voices.learn(params.voice, params.name);
+          this.log.info(`voice ${params.voice} is now ${r.name}`);
+          return text(`Remembered: that voice is ${r.name}.`);
+        } catch (err) {
+          return text(`Could not remember the voice: ${(err as Error).message}`);
+        }
+      },
+    });
+    pi.registerTool({
+      name: "voice_forget",
+      label: "Forget a voice",
+      description: "Forget a known voice by name, e.g. when it was learned wrong or someone asks you to.",
+      promptSnippet: "Forget a known voice",
+      parameters: { type: "object", properties: { name: { type: "string" } }, required: ["name"] },
+      execute: async (_id: string, params: { name: string }) => {
+        try {
+          await voices.forget(params.name);
+          return text(`Forgot the voice of ${params.name}.`);
+        } catch (err) {
+          return text(`Could not forget it: ${(err as Error).message}`);
+        }
+      },
+    });
+    pi.registerTool({
+      name: "voice_list",
+      label: "Known voices",
+      description: "The voices you know by name, and the unknown voices heard lately (their ids).",
+      promptSnippet: "List the voices you know",
+      parameters: { type: "object", properties: {} },
+      execute: async () => {
+        try {
+          const r = await voices.list();
+          const known = r.known.map((v) => v.name).join(", ") || "none";
+          const recent = r.recent.map((v) => v.id).join(", ") || "none";
+          return text(`Known voices: ${known}. Unknown voices heard lately: ${recent}.`);
+        } catch (err) {
+          return text(`Could not read the voices: ${(err as Error).message}`);
+        }
+      },
+    });
+  }
+
+  /**
+   * The speaker-labelled transcript as pi gets it: later stretches by unknown voices (TV, radio) left out, and
+   * a note to ask who is speaking when the speaker's voice is unknown (once per voice per day)
+   */
+  private voiceText(key: string, text: string): string {
+    const f = filterVoices(text);
+    if (f.dropped.length) {
+      this.log.info(`${key}: left out ${f.dropped.length} stretch(es) by other unknown voices: ${f.dropped.map((d) => `"${d.text.slice(0, 60)}"`).join(", ")}`);
+    }
+    if (f.speaker?.id && this.voices) {
+      return `${unknownSpeakerNote(f.speaker.id, this.askedVoices.shouldAsk(f.speaker.id))} ${f.text}`;
+    }
+    return f.text;
+  }
+
   private async tickWakeups(): Promise<void> {
     if (!this.cfg.wakeups) return;
     for (const w of this.wakeups.takeDue()) {
@@ -686,7 +861,10 @@ ${text}`;
   private onEvent(entry: Entry, event: { type: string; [k: string]: any }): void {
     const run = entry.run;
     if (!run) return;
-    const w = run.detached ? undefined : run.writer;
+    // an early answer that no request has adopted yet: its output waits in the buffer
+    const w: { write(s: string): unknown } | undefined = run.detached
+      ? undefined
+      : run.writer ?? (run.buffer ? { write: (s: string) => run.buffer!.push(s) } : undefined);
     switch (event.type) {
       case "message_start":
         if (event.message?.role === "assistant") run.timing.llmStart();
@@ -732,6 +910,130 @@ ${text}`;
     }
   }
 
+  /**
+   * Start the answer early (speculation.ts): a turn detection service thinks the request is complete. The
+   * conversation used last (a follow-up, within two minutes) or a new one; the output and tool calls wait.
+   */
+  async prepare(text: string, turn?: number): Promise<boolean> {
+    if (this.early && sameRequest(this.early.text, text)) return true;
+    if (this.early) await this.discardEarly("the speaker went on");
+    // turn 1: a new conversation (each wake word starts one); later turns: the conversation used last
+    let entry = turn === 1 ? undefined : await this.recentEntry(120_000);
+    let key = entry?.key;
+    let isNew = false;
+    if (!entry) {
+      let last: TurnRequest = {} as TurnRequest;
+      try {
+        last = JSON.parse(fs.readFileSync(warmupFile(), "utf8"));
+      } catch {
+        // no request yet since the first start
+      }
+      key = `early:${randomUUID()}`;
+      isNew = true;
+      const p = this.create(key, last);
+      this.entries.set(key, p);
+      entry = await p;
+    }
+    // busy, or an interruption note is waiting (it belongs in front of the real request)
+    if (entry.run || this.early || this.interruption) {
+      if (isNew) this.dispose(key!, entry);
+      return false;
+    }
+    const contextSent = entry.contextSent;
+    const leafBefore = entry.session.sessionManager.getLeafId();
+    const prompt = this.decorate(entry, this.voiceText(key!, text));
+    const run: Run = {
+      taskId: randomUUID(),
+      filter: new SpeechFilter(),
+      detached: false,
+      lastTextAt: 0,
+      lastAssistant: "",
+      spokeSomething: false,
+      timing: new TurnTiming(),
+      meta: {},
+      buffer: [],
+      gate: new Gate(),
+    };
+    entry.run = run;
+    const session = entry.session;
+    const done = session
+      .prompt(prompt, { expandPromptTemplates: false })
+      .then(() => session.waitForIdle())
+      .then(
+        () => undefined,
+        (err) => (err as Error).message,
+      );
+    const early: Early = { key: key!, entry, text, run, leafBefore, contextSent, isNew, done, at: Date.now() };
+    early.timer = setTimeout(() => {
+      if (this.early === early) void this.discardEarly("no request came");
+    }, 20_000);
+    this.early = early;
+    this.log.info(`${key}: early answer started: "${text.slice(0, 80)}"`);
+    return true;
+  }
+
+  /** The conversation used last, if within maxAgeMs and not busy */
+  private async recentEntry(maxAgeMs: number): Promise<Entry | undefined> {
+    let best: Entry | undefined;
+    for (const [key, p] of this.entries) {
+      if (key === WARMUP_KEY || key.startsWith("early:")) continue;
+      const e = await p.catch(() => undefined);
+      if (e && !e.run && Date.now() - e.lastUsed < maxAgeMs && (!best || e.lastUsed > best.lastUsed)) best = e;
+    }
+    return best;
+  }
+
+  /** Throw an early answer away: stop pi, and rewind the session (or drop the session made for it) */
+  private async discardEarly(why: string): Promise<void> {
+    const e = this.early;
+    if (!e) return;
+    this.early = undefined;
+    clearTimeout(e.timer);
+    e.run.gate!.open(false);
+    await e.entry.session.abort().catch(() => undefined);
+    await e.done;
+    e.entry.run = undefined;
+    if (e.isNew) {
+      const file = e.entry.session.sessionManager.getSessionFile();
+      this.dispose(e.key, e.entry);
+      if (file) fs.rmSync(file, { force: true });
+    } else {
+      // back to before the early prompt: navigating to its user message puts the session at that message's parent
+      const sm = e.entry.session.sessionManager;
+      const first = sm
+        .getEntries()
+        .find((x: any) => x.parentId === e.leafBefore && x.type === "message" && x.message?.role === "user");
+      if (first) await e.entry.session.navigateTree(first.id, { summarize: false }).catch((err: Error) => {
+        this.log.error(`rewinding the early answer failed: ${err.message}`);
+      });
+      e.entry.contextSent = e.contextSent;
+    }
+    this.log.info(`${e.key}: early answer thrown away (${why}): "${e.text.slice(0, 60)}"`);
+  }
+
+  /**
+   * The early answer for this request, if there is one: same words, and either the same conversation (a follow-up)
+   * or a new conversation that has no session yet. Any other early answer is thrown away first.
+   */
+  private async adoptEarly(key: string, text: string): Promise<Early | undefined> {
+    const e = this.early;
+    if (!e) return undefined;
+    const fits = e.isNew ? !this.entries.has(key) : e.key === key;
+    if (!fits || !sameRequest(e.text, text) || Date.now() - e.at > 20_000) {
+      await this.discardEarly(fits ? "different words" : "another conversation");
+      return undefined;
+    }
+    this.early = undefined;
+    clearTimeout(e.timer);
+    if (e.isNew) {
+      this.entries.delete(e.key);
+      e.entry.key = key;
+      this.entries.set(key, Promise.resolve(e.entry));
+    }
+    this.log.info(`${key}: early answer adopted (${Date.now() - e.at} ms ahead)`);
+    return e;
+  }
+
   async turn(req: TurnRequest, res: http.ServerResponse): Promise<void> {
     const text = (req.text ?? "").trim();
     const key = req.session_key || req.conversation_id || "default";
@@ -740,9 +1042,11 @@ ${text}`;
     const timing = new TurnTiming();
     if (validTimeZone(req.time_zone)) this.haTimeZone = req.time_zone;
     this.rememberForWarmup(req);
+    // an answer already started on these words (POST /v1/prepare)? Before the session lookup: it may bring one
+    const early = this.early ? await this.adoptEarly(key, text) : undefined;
     let entry: Entry;
     try {
-      entry = await this.entry(key, req);
+      entry = early ? early.entry : await this.entry(key, req);
     } catch (err) {
       send({ t: "error", message: `Could not start a pi session: ${(err as Error).message}` });
       res.end();
@@ -751,30 +1055,42 @@ ${text}`;
     entry.lastUsed = Date.now();
     timing.session_ready = timing.now();
 
-    // Woken by the TV? Then pi never sees this text: a remark about it (first), or a quiet end (retry)
+    // Speaker labels from the speech-to-text: background voices out, "who is speaking?" for an unknown voice
     let prompt = text;
+    const heard = filterVoices(text).text;
+
+    // Woken by the TV? Then pi never sees this text: a remark about it (first), or a quiet end (retry)
     if (req.screen === "first" || req.screen === "retry") {
-      const v = await this.screen(entry, req, text);
+      const v = await this.screen(entry, req, heard);
       timing.screened = timing.now();
       this.log.info(`${key}: screened (${req.screen}) in ${timing.screened - timing.session_ready} ms: ${v.verdict}`);
       if (v.verdict === "noise") {
+        if (early) {
+          this.early = early;
+          await this.discardEarly("not meant for the assistant");
+        }
         if (req.screen === "first") send({ t: "text", d: toSpeech(v.remark || "Was that meant for me?") });
         timing.done = timing.now();
         send({ t: "done", screened: req.screen === "first" ? "noise" : "dismiss", timing });
         res.end();
         return;
       }
-      if (req.screen === "retry") prompt = withScreenContext(text, req.screen_previous);
     }
-
     const meta = { conversation_id: req.conversation_id, device_id: req.device_id, satellite_id: req.satellite_id };
-
-    prompt = this.decorate(entry, prompt);
+    if (!early) {
+      prompt = this.voiceText(key, text);
+      if (req.screen === "retry") prompt = withScreenContext(prompt, req.screen_previous);
+      if (this.interruption && Date.now() - this.interruption.at < 60_000) {
+        prompt = `${interruptionNote(this.interruption)} ${prompt}`;
+      }
+      this.interruption = undefined;
+      prompt = this.decorate(entry, prompt);
+    }
     entry.started ??= Date.now();
     entry.device = req.satellite_id ?? req.device_id ?? entry.device;
 
     // Still working on an earlier (detached) request: queue this one behind it
-    if (entry.run) {
+    if (entry.run && entry.run !== early?.run) {
       entry.run.meta = meta;
       entry.turns++;
       entry.session.prompt(prompt, { streamingBehavior: "followUp", expandPromptTemplates: false }).catch((err) => {
@@ -786,17 +1102,28 @@ ${text}`;
       return;
     }
 
-    const run: Run = {
-      taskId: randomUUID(),
-      writer: res,
-      filter: new SpeechFilter(),
-      detached: false,
-      lastTextAt: 0,
-      lastAssistant: "",
-      spokeSomething: false,
-      timing,
-      meta,
-    };
+    const run: Run = early
+      ? early.run
+      : {
+          taskId: randomUUID(),
+          writer: res,
+          filter: new SpeechFilter(),
+          detached: false,
+          lastTextAt: 0,
+          lastAssistant: "",
+          spokeSomething: false,
+          timing,
+          meta,
+        };
+    if (early) {
+      // what the early answer said so far goes out now, the rest as it comes; its tool calls may run
+      for (const line of run.buffer ?? []) res.write(line);
+      run.buffer = undefined;
+      run.writer = res;
+      run.meta = meta;
+      run.timing = timing;
+      run.gate!.open(true);
+    }
     entry.run = run;
     const started = Date.now();
     const budgetMs = Math.max(2, req.budget_s ?? this.cfg.defaultBudgetS) * 1000;
@@ -839,11 +1166,15 @@ ${text}`;
     });
 
     let error: string | undefined;
-    try {
-      await entry.session.prompt(prompt, { expandPromptTemplates: false });
-      await entry.session.waitForIdle();
-    } catch (err) {
-      error = (err as Error).message;
+    if (early) {
+      error = await early.done;
+    } else {
+      try {
+        await entry.session.prompt(prompt, { expandPromptTemplates: false });
+        await entry.session.waitForIdle();
+      } catch (err) {
+        error = (err as Error).message;
+      }
     }
     clearInterval(timer);
     entry.run = undefined;
@@ -1122,6 +1453,30 @@ export function createServer(cfg: BridgeConfig, bridge: Bridge, log: Logger = co
         const body = await readJson(req);
         if (typeof body.text !== "string" || !body.text.trim()) return json(400, { error: "text is required" });
         return await bridge.turn(body, res);
+      }
+      if (req.method === "POST" && url.pathname === "/v1/turn-check") {
+        const body = await readJson(req);
+        if (typeof body.text !== "string" || !body.text.trim()) return json(400, { error: "text is required" });
+        const p = await bridge.turnCheck(body.text, Number(body.silence_ms) || 0);
+        return p === undefined ? json(404, { error: "no classifier (TypeSafe key or PI_BRIDGE_SCREEN_MODEL)" }) : json(200, { complete: p });
+      }
+      if (req.method === "POST" && url.pathname === "/v1/interrupt-check") {
+        const body = await readJson(req);
+        if (typeof body.text !== "string" || !body.text.trim()) return json(400, { error: "text is required" });
+        const p = await bridge.interruptCheck(body.text, String(body.assistant_said ?? ""));
+        return p === undefined ? json(404, { error: "no classifier (TypeSafe key or PI_BRIDGE_SCREEN_MODEL)" }) : json(200, { interrupt: p });
+      }
+      if (req.method === "POST" && url.pathname === "/v1/prepare") {
+        const body = await readJson(req);
+        if (typeof body.text !== "string" || !body.text.trim()) return json(400, { error: "text is required" });
+        const turn = Number.isInteger(body.turn) ? Number(body.turn) : undefined;
+        return json(200, { started: await bridge.prepare(body.text.trim(), turn) });
+      }
+      if (req.method === "POST" && url.pathname === "/v1/interruptions") {
+        const body = await readJson(req);
+        if (typeof body.text !== "string" || !body.text.trim()) return json(400, { error: "text is required" });
+        bridge.noteInterruption({ who: body.who ? String(body.who) : undefined, text: body.text, heard_part: body.heard_part ? String(body.heard_part) : undefined });
+        return json(200, { ok: true });
       }
       if (req.method === "GET" && url.pathname.startsWith("/v1/tasks/")) {
         const task = bridge.task(decodeURIComponent(url.pathname.slice("/v1/tasks/".length)));
