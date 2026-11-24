@@ -15,6 +15,8 @@ CONF_FAILED_MESSAGE: Final = "failed_message"
 CONF_WORKSPACE: Final = "workspace"
 CONF_DEBUG: Final = "debug"
 CONF_NOISE_FILTER: Final = "noise_filter"
+CONF_CONVERSATION: Final = "conversation"
+CONF_MEDIA_PLAYERS: Final = "media_players"
 
 SESSION_PER_CONVERSATION: Final = "per_conversation"
 SESSION_PER_DEVICE: Final = "per_device"
@@ -31,6 +33,9 @@ DEFAULT_OPTIONS: Final = {
     CONF_WORKSPACE: "",
     CONF_DEBUG: False,
     CONF_NOISE_FILTER: True,
+    CONF_CONVERSATION: False,
+    # empty: every media player (except the voice device's own)
+    CONF_MEDIA_PLAYERS: [],
 }
 
 EVENT_TASK_STARTED: Final = "pi_agent_task_started"

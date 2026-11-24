@@ -38,6 +38,9 @@ import { buildAssistantSection, loadAssistantPrompt, withToolsSection } from "./
 import {
   classifierContext,
   cleanRemark,
+  describeMedia,
+  isQuiet,
+  QUIET,
   parseVerdict,
   remarkMessage,
   remarkPrompt,
@@ -48,7 +51,7 @@ import {
   interruptContext,
   interruptionNote,
 } from "./screen.ts";
-import type { ScreenInput, ScreenPrevious, ScreenStage, ScreenVerdict } from "./screen.ts";
+import type { MediaNow, ScreenInput, ScreenPrevious, ScreenStage, ScreenVerdict } from "./screen.ts";
 import { SpeechFilter, toSpeech } from "./speech.ts";
 import { dayLabel, hhmm, hostTimeZone, parseWhen, validTimeZone } from "./clock.ts";
 import {
@@ -65,7 +68,8 @@ import { describeWakeup, MAX_LATE_MS, WakeupStore } from "./wakeups.ts";
 import type { Wakeup } from "./wakeups.ts";
 import { TurnTiming } from "./timing.ts";
 import { Gate, sameRequest } from "./speculation.ts";
-import { AskedVoices, filterVoices, LABELS_EXPLAINED, unknownSpeakerNote, VoiceIndexClient } from "./voices.ts";
+import { filterVoices, LABELS_EXPLAINED, speakerKind, unknownSpeakerNote, VoiceAsker, VoiceIndexClient } from "./voices.ts";
+import * as history from "./history.ts";
 
 /**
  * pi's built-in extensions (llama.cpp provider, mcp, tool-search, ...). The pi CLI loads them into every
@@ -76,6 +80,10 @@ import { AskedVoices, filterVoices, LABELS_EXPLAINED, unknownSpeakerNote, VoiceI
 const WARMUP_KEY = "__warmup__";
 const WAKEUP_TOOLS = ["wakeup_set", "wakeup_list", "wakeup_cancel"];
 const VOICE_TOOLS = ["voice_learn", "voice_forget", "voice_list"];
+const HISTORY_TOOLS = ["conversation_search", "conversation_read", "conversation_delete"];
+const LISTEN_TOOLS = ["not_for_me"];
+/** pi's saved conversations (session files, one folder per working directory) */
+const sessionsDir = () => path.join(getAgentDir(), "sessions");
 const warmupFile = () => path.join(getAgentDir(), "va-bridge-warmup.json");
 
 let builtins: Promise<InlineExtension[]> | undefined;
@@ -93,7 +101,7 @@ function builtInExtensions(log: Logger): Promise<InlineExtension[]> {
   return builtins;
 }
 
-export const BRIDGE_VERSION = "0.7.0";
+export const BRIDGE_VERSION = "0.8.0";
 
 export interface Logger {
   info(msg: string): void;
@@ -162,6 +170,8 @@ interface TurnRequest {
   screen?: ScreenStage;
   /** stage "retry": what was heard after the wake word and the remark made about it */
   screen_previous?: ScreenPrevious;
+  /** what the media players play now (Home Assistant; for voice devices): tells the TV from a person */
+  media?: MediaNow[];
 }
 
 interface Run {
@@ -181,7 +191,12 @@ interface Run {
   buffer?: string[];
   /** ... and its tool calls wait for this */
   gate?: Gate;
+  /** pi called not_for_me: what it heard was not said to it (the remark to make, "" for none) */
+  notForMe?: string;
 }
+
+/** The voice label a transcript starts with ("[Anders] ..." -> "Anders"), "" for none */
+const firstLabel = (text: string) => /^\s*\[([^\]]{1,60})\]/.exec(text)?.[1].trim().toLowerCase() ?? "";
 
 /** An answer started early (speculation.ts) */
 interface Early {
@@ -261,6 +276,7 @@ export class Bridge {
   private log: Logger;
   private reaper: NodeJS.Timeout;
   private ticker: NodeJS.Timeout;
+  private expirer: NodeJS.Timeout;
   readonly wakeups: WakeupStore;
   /** an answer started early on a turn detection service's word (POST /v1/prepare) */
   private early?: Early;
@@ -268,10 +284,12 @@ export class Bridge {
   private interruption?: { who?: string; text: string; heard_part?: string; at: number };
   /** the speaker recognition service (voice tools), when PI_BRIDGE_SPEAKER_ID_URL is set */
   private voices?: VoiceIndexClient;
-  /** unknown voices the assistant asked "who is speaking?" lately */
-  private askedVoices = new AskedVoices();
+  /** whether to ask an unknown voice who it is (again) */
+  private asker?: VoiceAsker;
   /** Home Assistant's time zone from the last turn (remembered across restarts in the warm-up file) */
   private haTimeZone?: string;
+  /** what the media players played at the last request (for early answers, which come without it) */
+  private lastMedia?: { at: number; media?: MediaNow[] };
   /** summaries are written one after the other: each one builds on the note the last one wrote */
   private summaries: Promise<void> = Promise.resolve();
   /** "extension" when running inside pi, "headless" for the stand-alone service */
@@ -290,9 +308,16 @@ export class Bridge {
       // no turn yet
     }
     this.wakeups = new WakeupStore(path.join(getAgentDir(), "va-bridge-wakeups.json"));
-    if (cfg.speakerIdUrl) this.voices = new VoiceIndexClient(cfg.speakerIdUrl, cfg.speakerIdToken);
+    if (cfg.speakerIdUrl) {
+      this.voices = new VoiceIndexClient(cfg.speakerIdUrl, cfg.speakerIdToken);
+      this.asker = new VoiceAsker(this.voices, cfg.voiceAskAgainDays * 86_400_000);
+    }
     this.ticker = setInterval(() => void this.tickWakeups(), 15_000);
     this.ticker.unref();
+    // saved conversations older than PI_BRIDGE_CONVERSATION_KEEP_DAYS go: now, and every hour
+    setTimeout(() => void this.expireConversations(), 10_000).unref();
+    this.expirer = setInterval(() => void this.expireConversations(), 3600_000);
+    this.expirer.unref();
   }
 
   /** The assistant's time zone: PI_BRIDGE_TIMEZONE, else Home Assistant's, else the host's */
@@ -313,6 +338,7 @@ export class Bridge {
   async close(): Promise<void> {
     clearInterval(this.reaper);
     clearInterval(this.ticker);
+    clearInterval(this.expirer);
     for (const [key, p] of this.entries) {
       const e = await p.catch(() => undefined);
       if (e) {
@@ -498,6 +524,10 @@ export class Bridge {
           ...(this.voices
             ? [{ name: "va-bridge-voices", hidden: true, factory: (pi: any) => this.registerVoiceTools(pi) }]
             : []),
+          ...(this.cfg.history
+            ? [{ name: "va-bridge-history", hidden: true, factory: (pi: any) => this.registerHistoryTools(pi, holder) }]
+            : []),
+          { name: "va-bridge-listen", hidden: true, factory: (pi: any) => this.registerListenTools(pi, holder) },
           {
             // an early answer (POST /v1/prepare) does nothing until a request adopts it: its tool calls wait
             name: "va-bridge-early",
@@ -530,7 +560,15 @@ export class Bridge {
       ...(thinkingLevel ? { thinkingLevel } : {}),
       // a restricted tool list (PI_BRIDGE_TOOLS) still gets the bridge's own tools
       ...(this.cfg.tools
-        ? { tools: [...this.cfg.tools, ...(this.cfg.wakeups ? WAKEUP_TOOLS : []), ...(this.voices ? VOICE_TOOLS : [])] }
+        ? {
+            tools: [
+              ...this.cfg.tools,
+              ...(this.cfg.wakeups ? WAKEUP_TOOLS : []),
+              ...(this.voices ? VOICE_TOOLS : []),
+              ...(this.cfg.history ? HISTORY_TOOLS : []),
+              ...LISTEN_TOOLS,
+            ],
+          }
         : {}),
     });
     await session.bindExtensions({
@@ -714,6 +752,39 @@ ${text}`;
     });
   }
 
+  // ------------------------------------------------------------------------------------------ not for me
+
+  /**
+   * not_for_me: what pi heard was not said to it (the TV, people talking to each other). It makes a short remark
+   * or none, and the voice device listens a few seconds more: someone it knows gets through, anything else ends
+   * the conversation quietly (the same as noise screening after a wake word, screen.ts).
+   */
+  private registerListenTools(pi: any, holder: { entry?: Entry }): void {
+    pi.registerTool({
+      name: "not_for_me",
+      label: "Not for me",
+      description:
+        "What you just heard was not said to you: the TV, the radio, or people talking to each other. Call it " +
+        "instead of answering, with one short offhand (perhaps sarcastic) remark about what you heard, or with no " +
+        "remark to stay quiet; vary it. Say nothing else. Afterwards you listen a few seconds for someone you know, " +
+        "and go back to sleep if nobody speaks to you.",
+      promptSnippet: "What you heard was not said to you (TV, radio, others talking): a remark or silence, then listen",
+      parameters: {
+        type: "object",
+        properties: { remark: { type: "string", description: "What to say about it (plain words, read aloud), or empty to stay quiet" } },
+      },
+      execute: async (_id: string, p: { remark?: string }) => {
+        const run = holder.entry?.run;
+        if (run) run.notForMe = cleanRemark(p.remark ?? "") ?? "";
+        return {
+          content: [{ type: "text", text: "Done. End your turn now without saying anything more." }],
+          details: {},
+          terminate: true,
+        };
+      },
+    });
+  }
+
   // ------------------------------------------------------------------------------------------ voices
 
   private registerVoiceTools(pi: any): void {
@@ -779,17 +850,113 @@ ${text}`;
     });
   }
 
+  // ------------------------------------------------------------------------------------------ past conversations
+
+  /** The session files of the sessions open now (not to be deleted) */
+  private async filesInUse(): Promise<Set<string>> {
+    const out = new Set<string>();
+    for (const p of this.entries.values()) {
+      const e = await p.catch(() => undefined);
+      const f = e?.session.sessionManager.getSessionFile();
+      if (f) out.add(path.resolve(f));
+    }
+    return out;
+  }
+
+  private async expireConversations(): Promise<void> {
+    try {
+      const gone = history.expire(sessionsDir(), this.cfg.conversationKeepDays, await this.filesInUse());
+      if (gone.length) {
+        this.log.info(`deleted ${gone.length} saved conversation(s) older than ${this.cfg.conversationKeepDays} days`);
+      }
+    } catch (err) {
+      this.log.error(`expiring saved conversations failed: ${(err as Error).message}`);
+    }
+  }
+
+  private registerHistoryTools(pi: any, holder: { entry?: Entry }): void {
+    const tz = () => this.tz;
+    const text = (t: string) => ({ content: [{ type: "text", text: t }], details: {} });
+    const keep = this.cfg.conversationKeepDays;
+    const kept = keep > 0 ? `the last ${keep} days` : "all of them";
+    const parseDay = (s?: string, end = false) => {
+      if (!s?.trim()) return undefined;
+      const t = Date.parse(/^\d{4}-\d{2}-\d{2}$/.test(s.trim()) ? `${s.trim()}T${end ? "23:59:59" : "00:00:00"}` : s);
+      return Number.isNaN(t) ? undefined : t;
+    };
+    pi.registerTool({
+      name: "conversation_search",
+      label: "Search past conversations",
+      description:
+        `Search the conversations you have had (${kept} are kept): by words that were said, and/or by date. Use it ` +
+        "when someone refers to something you talked about before, or asks what you talked about. Returns ids, " +
+        "dates and the lines that match; read one in full with conversation_read.",
+      promptSnippet: "Search past conversations by words or date",
+      parameters: {
+        type: "object",
+        properties: {
+          query: { type: "string", description: "Words to look for (any of them). Empty: the latest conversations" },
+          from: { type: "string", description: 'Only from this day on, "YYYY-MM-DD"' },
+          to: { type: "string", description: 'Only up to this day, "YYYY-MM-DD"' },
+          limit: { type: "number", description: "At most this many (default 10)" },
+        },
+      },
+      execute: async (_id: string, p: { query?: string; from?: string; to?: string; limit?: number }) => {
+        const current = holder.entry?.session.sessionManager.getSessionFile();
+        const hits = history
+          .search(sessionsDir(), { query: p.query, from: parseDay(p.from), to: parseDay(p.to, true), limit: p.limit })
+          .filter((h) => !current || path.resolve(h.conversation.file) !== path.resolve(current));
+        return text(history.describeHits(hits, tz()));
+      },
+    });
+    pi.registerTool({
+      name: "conversation_read",
+      label: "Read a past conversation",
+      description: "Read a past conversation in full, by its id from conversation_search.",
+      promptSnippet: "Read a past conversation",
+      parameters: { type: "object", properties: { id: { type: "string" } }, required: ["id"] },
+      execute: async (_id: string, p: { id: string }) => {
+        const c = history.find(sessionsDir(), p.id);
+        return text(c ? history.describeConversation(c, tz()) : `No saved conversation ${p.id}.`);
+      },
+    });
+    pi.registerTool({
+      name: "conversation_delete",
+      label: "Delete a past conversation",
+      description:
+        "Delete a saved conversation for good, by its id from conversation_search. Only when someone asks you to " +
+        "delete or forget a conversation: find it first, and make sure it is the one they mean. It cannot be undone. " +
+        "If your short-term memory note mentions it, take that out of the note too.",
+      promptSnippet: "Delete a past conversation for good (only when asked)",
+      parameters: { type: "object", properties: { id: { type: "string" } }, required: ["id"] },
+      execute: async (_id: string, p: { id: string }) => {
+        const c = history.find(sessionsDir(), p.id);
+        if (!c) return text(`No saved conversation ${p.id}.`);
+        const current = holder.entry?.session.sessionManager.getSessionFile();
+        if (current && path.resolve(current) === path.resolve(c.file)) {
+          return text("That is the conversation you are in now: it can be deleted once it is over.");
+        }
+        if (!history.remove(sessionsDir(), c.id, await this.filesInUse())) {
+          return text("That conversation is still open on another device: it can be deleted once it is over.");
+        }
+        this.log.info(`conversation ${c.id} deleted on request`);
+        return text(`Deleted conversation ${c.id} for good.`);
+      },
+    });
+  }
+
   /**
    * The speaker-labelled transcript as pi gets it: later stretches by unknown voices (TV, radio) left out, and
-   * a note to ask who is speaking when the speaker's voice is unknown (once per voice per day)
+   * a note about an unknown speaker: ask who is speaking (once, and again after PI_BRIDGE_VOICE_ASK_AGAIN_DAYS),
+   * or that the voice was heard before
    */
-  private voiceText(key: string, text: string): string {
+  private async voiceText(key: string, text: string, playing?: string): Promise<string> {
     const f = filterVoices(text);
     if (f.dropped.length) {
       this.log.info(`${key}: left out ${f.dropped.length} stretch(es) by other unknown voices: ${f.dropped.map((d) => `"${d.text.slice(0, 60)}"`).join(", ")}`);
     }
     if (f.speaker?.id && this.voices) {
-      return `${unknownSpeakerNote(f.speaker.id, this.askedVoices.shouldAsk(f.speaker.id))} ${f.text}`;
+      return `${unknownSpeakerNote(f.speaker.id, await this.asker!.decide(f.speaker.id), Date.now(), playing)} ${f.text}`;
     }
     return f.text;
   }
@@ -872,7 +1039,7 @@ ${text}`;
       case "message_update": {
         const ame = event.assistantMessageEvent;
         if (typeof ame?.delta === "string") run.timing.llmDelta(ame.type === "text_delta" ? ame.delta.length : 0);
-        if (ame?.type === "text_delta" && w) {
+        if (ame?.type === "text_delta" && w && run.notForMe === undefined) {
           const s = run.filter.push(ame.delta);
           if (s) {
             run.lastTextAt = Date.now();
@@ -887,7 +1054,7 @@ ${text}`;
         if (event.message?.role === "assistant") run.timing.llmEnd();
         const txt = assistantText(event.message);
         if (txt) run.lastAssistant = txt;
-        if (w && event.message?.role === "assistant") {
+        if (w && event.message?.role === "assistant" && run.notForMe === undefined) {
           const s = run.filter.flush();
           // separate consecutive assistant messages (e.g. "Let me check." ... tools ... "Done.")
           const sep = s.trim() || run.spokeSomething ? " " : "";
@@ -934,6 +1101,8 @@ ${text}`;
       this.entries.set(key, p);
       entry = await p;
     }
+    const media = this.lastMedia && Date.now() - this.lastMedia.at < 120_000 ? this.lastMedia.media : undefined;
+    const voiced = await this.voiceText(key!, text, describeMedia(media));
     // busy, or an interruption note is waiting (it belongs in front of the real request)
     if (entry.run || this.early || this.interruption) {
       if (isNew) this.dispose(key!, entry);
@@ -941,7 +1110,7 @@ ${text}`;
     }
     const contextSent = entry.contextSent;
     const leafBefore = entry.session.sessionManager.getLeafId();
-    const prompt = this.decorate(entry, this.voiceText(key!, text));
+    const prompt = this.decorate(entry, voiced);
     const run: Run = {
       taskId: randomUUID(),
       filter: new SpeechFilter(),
@@ -1019,8 +1188,10 @@ ${text}`;
     const e = this.early;
     if (!e) return undefined;
     const fits = e.isNew ? !this.entries.has(key) : e.key === key;
-    if (!fits || !sameRequest(e.text, text) || Date.now() - e.at > 20_000) {
-      await this.discardEarly(fits ? "different words" : "another conversation");
+    // the early text's voice label went to pi: it must be the same voice as in the final text
+    const sameVoice = firstLabel(e.text) === firstLabel(text);
+    if (!fits || !sameRequest(e.text, text) || !sameVoice || Date.now() - e.at > 20_000) {
+      await this.discardEarly(!fits ? "another conversation" : sameVoice ? "different words" : "another voice label");
       return undefined;
     }
     this.early = undefined;
@@ -1042,6 +1213,7 @@ ${text}`;
     const timing = new TurnTiming();
     if (validTimeZone(req.time_zone)) this.haTimeZone = req.time_zone;
     this.rememberForWarmup(req);
+    this.lastMedia = { at: Date.now(), media: req.media };
     // an answer already started on these words (POST /v1/prepare)? Before the session lookup: it may bring one
     const early = this.early ? await this.adoptEarly(key, text) : undefined;
     let entry: Entry;
@@ -1069,16 +1241,22 @@ ${text}`;
           this.early = early;
           await this.discardEarly("not meant for the assistant");
         }
-        if (req.screen === "first") send({ t: "text", d: toSpeech(v.remark || "Was that meant for me?") });
+        // first: a remark, or nothing (then the voice device only listens); retry: end quietly
+        let screened = "dismiss";
+        if (req.screen === "first" && v.quiet) screened = "listen";
+        else if (req.screen === "first") {
+          send({ t: "text", d: toSpeech(v.remark || "Was that meant for me?") });
+          screened = "noise";
+        }
         timing.done = timing.now();
-        send({ t: "done", screened: req.screen === "first" ? "noise" : "dismiss", timing });
+        send({ t: "done", screened, timing });
         res.end();
         return;
       }
     }
     const meta = { conversation_id: req.conversation_id, device_id: req.device_id, satellite_id: req.satellite_id };
     if (!early) {
-      prompt = this.voiceText(key, text);
+      prompt = await this.voiceText(key, text, describeMedia(req.media));
       if (req.screen === "retry") prompt = withScreenContext(prompt, req.screen_previous);
       if (this.interruption && Date.now() - this.interruption.at < 60_000) {
         prompt = `${interruptionNote(this.interruption)} ${prompt}`;
@@ -1189,6 +1367,15 @@ ${text}`;
       error = `it was still not done after ${this.cfg.taskTimeoutMinutes} minutes, so I stopped it`;
     }
 
+    if (!run.detached && run.notForMe !== undefined) {
+      // not said to pi: its remark (or nothing), then the voice device listens for someone it knows
+      this.log.info(`${key}: not meant for the assistant${run.notForMe ? `, remark: "${run.notForMe}"` : ", stays quiet"}`);
+      if (run.notForMe) send({ t: "text", d: toSpeech(run.notForMe) });
+      timing.done = timing.now();
+      send({ t: "done", screened: run.notForMe ? "noise" : "listen", session_id: entry.session.sessionId, timing });
+      res.end();
+      return;
+    }
     if (!run.detached) {
       const rest = run.filter.flush();
       if (rest) send({ t: "text", d: rest });
@@ -1233,7 +1420,14 @@ ${text}`;
       language: req.language,
       persona: loadAssistantPrompt(cwd, getAgentDir()).text,
       previous: req.screen_previous,
+      voice: speakerKind(text),
+      media: req.media,
     };
+    // a voice it knows by name talks to it (the classifier is for the TV, the radio, unknown voices)
+    if (input.voice === "known") {
+      this.log.info("noise screening: a known voice, let through");
+      return { verdict: "talk" };
+    }
     const modelRuntime = await this.runtime();
     const textVerdict = this.cfg.screenModel?.trim() === "text";
     const classifier = textVerdict
@@ -1252,9 +1446,16 @@ ${text}`;
         if (answer?.type !== "bool") throw new Error("the classifier gave no answer");
         const probability = answer.probability;
         this.log.info(`noise screening (${classifier.provider}/${classifier.id}): meant for the assistant ${probability.toFixed(2)}`);
-        if (probability >= this.cfg.screenThreshold) return { verdict: "talk", probability };
+        // an unknown voice answering a remark about the TV is most likely the TV again (unless nothing plays)
+        const nothingPlays = input.media !== undefined && input.media.length === 0;
+        const threshold =
+          input.stage === "retry" && input.voice === "unknown" && !nothingPlays
+            ? Math.max(this.cfg.screenThreshold, this.cfg.screenUnknownThreshold)
+            : this.cfg.screenThreshold;
+        if (probability >= threshold) return { verdict: "talk", probability };
         if (input.stage === "retry") return { verdict: "noise", probability };
-        return { verdict: "noise", probability, remark: await this.remark(modelRuntime, model, input) };
+        const remark = await this.remark(modelRuntime, model, input);
+        return remark === QUIET ? { verdict: "noise", probability, quiet: true } : { verdict: "noise", probability, remark };
       }
       const msg = await modelRuntime.completeSimple(
         model,
@@ -1300,6 +1501,7 @@ ${text}`;
   }
 
   /** The chat model's sarcastic remark about what it heard (thinking off); undefined when that fails */
+  /** The remark about background noise; QUIET when the assistant chose to say nothing */
   private async remark(modelRuntime: ModelRuntime, model: Model<Api>, input: ScreenInput): Promise<string | undefined> {
     try {
       const msg = await modelRuntime.completeSimple(
@@ -1308,7 +1510,8 @@ ${text}`;
         { maxTokens: 100, signal: AbortSignal.timeout(15_000) },
       );
       if (msg.stopReason === "error" || msg.stopReason === "aborted") throw new Error(msg.errorMessage || msg.stopReason);
-      return cleanRemark(msg.content.map((c) => (c.type === "text" ? c.text : "")).join(""));
+      const said = msg.content.map((c) => (c.type === "text" ? c.text : "")).join("");
+      return isQuiet(said) ? QUIET : cleanRemark(said);
     } catch (err) {
       this.log.error(`noise remark failed: ${(err as Error).message}`);
       return undefined;

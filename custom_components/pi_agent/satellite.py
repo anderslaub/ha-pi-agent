@@ -19,6 +19,9 @@ WORKING_ACTION = "pi_agent_working"
 LOADING_ACTION = "pi_agent_loading"
 # ... and this one (no variables) to end the conversation quietly: the noise filter decided it was the TV talking.
 DISMISS_ACTION = "pi_agent_dismiss"
+# ... and this one (no variables) to listen a few seconds more without saying anything first: the assistant heard
+# background noise and chose to stay quiet. Without it the conversation just ends.
+LISTEN_ACTION = "pi_agent_listen"
 
 
 def _device_id(hass: HomeAssistant, satellite_id: str | None, device_id: str | None) -> str | None:
@@ -82,6 +85,18 @@ async def async_dismiss(hass: HomeAssistant, satellite_id: str | None, device_id
     return service
 
 
+async def async_listen(hass: HomeAssistant, satellite_id: str | None, device_id: str | None) -> str | None:
+    """Tell the satellite to listen again without a reply first. Returns the action used."""
+    if not (service := esphome_service(hass, satellite_id, device_id, LISTEN_ACTION)):
+        return None
+    try:
+        await hass.services.async_call("esphome", service, {}, blocking=True)
+    except Exception:  # noqa: BLE001
+        _LOGGER.warning("Could not call esphome.%s", service, exc_info=True)
+        return None
+    return service
+
+
 async def async_set_loading(hass: HomeAssistant, loading: bool) -> list[str]:
     """Tell every ESPHome device with a pi_agent_loading action whether the assistant is still starting up."""
     services = [
@@ -118,3 +133,45 @@ def tts_media_id(hass: HomeAssistant, pipeline: Pipeline, text: str) -> str | No
     return tts.generate_media_source_id(
         hass, text, engine=engine, language=pipeline.tts_language, options=options
     )
+
+
+# What a media player reports while it may be making sound (a TV often says "on" without "playing"); other
+# entities (a TV's remote, a smart plug, a switch) count when they are "on"
+_SOUNDING = {"playing", "on", "buffering"}
+_MEDIA_ATTRS = {
+    "title": "media_title",
+    "artist": "media_artist",
+    "series": "media_series_title",
+    "channel": "media_channel",
+    "app": "app_name",
+}
+
+
+def media_now(
+    hass: HomeAssistant, entity_ids: list[str], satellite_id: str | None, device_id: str | None
+) -> list[dict[str, str]] | None:
+    """What may be making sound now: the chosen entities that are playing or on, with their titles.
+
+    With chosen entities, an empty list means nothing plays. Without (entity_ids empty) every media player is looked
+    at, except the voice device's own; then not finding one playing proves nothing (a TV may not be a media player
+    in Home Assistant), so it is None, the same as not knowing.
+    """
+    own = _device_id(hass, satellite_id, device_id)
+    registry = er.async_get(hass)
+    players = entity_ids or hass.states.async_entity_ids("media_player")
+    out: list[dict[str, str]] = []
+    for entity_id in players:
+        entry = registry.async_get(entity_id)
+        if not entity_ids and own and entry is not None and entry.device_id == own:
+            continue  # the voice device's own speaker: that is the assistant talking
+        state = hass.states.get(entity_id)
+        if state is None or state.state not in _SOUNDING:
+            continue
+        item = {"name": str(state.attributes.get("friendly_name") or entity_id), "state": state.state}
+        for key, attr in _MEDIA_ATTRS.items():
+            if value := state.attributes.get(attr):
+                item[key] = str(value)
+        out.append(item)
+    if not out and not entity_ids:
+        return None
+    return out

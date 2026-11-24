@@ -19,6 +19,8 @@ from homeassistant.core import callback
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.selector import (
     BooleanSelector,
+    EntitySelector,
+    EntitySelectorConfig,
     NumberSelector,
     NumberSelectorConfig,
     NumberSelectorMode,
@@ -40,6 +42,8 @@ from .const import (
     CONF_DETACH_MESSAGE,
     CONF_FAILED_MESSAGE,
     CONF_NOISE_FILTER,
+    CONF_CONVERSATION,
+    CONF_MEDIA_PLAYERS,
     CONF_PROMPT,
     CONF_RESET_HOURS,
     CONF_SESSION_MODE,
@@ -170,7 +174,13 @@ class PiAgentOptionsFlow(OptionsFlow):
                 vol.Required(CONF_DETACH_MESSAGE): TextSelector(),
                 vol.Required(CONF_BUSY_MESSAGE): TextSelector(),
                 vol.Optional(CONF_FAILED_MESSAGE): TextSelector(),
+                vol.Optional(CONF_CONVERSATION, default=False): BooleanSelector(),
                 vol.Optional(CONF_NOISE_FILTER, default=True): BooleanSelector(),
+                vol.Optional(CONF_MEDIA_PLAYERS): EntitySelector(
+                    EntitySelectorConfig(
+                        domain=["media_player", "remote", "switch", "binary_sensor", "input_boolean"], multiple=True
+                    )
+                ),
                 vol.Optional(CONF_WORKSPACE): TextSelector(),
                 vol.Optional(CONF_DEBUG, default=False): BooleanSelector(),
             }

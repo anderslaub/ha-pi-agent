@@ -162,10 +162,24 @@ Home Assistant then runs the pi pipeline only when that wake word is heard.
 Wake words also fire on the TV. The assistant would then answer whatever the TV said and wait for a reply.
 With the noise filter, the first text of a conversation from a voice device (and only that: follow-ups of a
 real conversation and typed chats are not checked) is first judged by a classifier: was it meant for the
-assistant? If not, pi never sees it. The chat model (thinking off) makes one short sarcastic remark about what
-it heard and asks whether that was meant for it. If the answer is background speech again (or "no, that was the
-TV"), the conversation ends without a word. A real answer ("yes, turn on the light") goes to pi with what came
-before. When in doubt the text counts as meant for the assistant, and when the check fails the turn goes through.
+assistant? If not, pi never sees it. The chat model (thinking off) chooses: one short offhand remark about what
+it heard, or nothing at all; either way the device listens a few seconds more. If what it hears then is
+background speech again (or "no, that was the TV"), or nothing, the conversation ends without a word. A real
+answer ("yes, turn on the light", or just "hey") goes to pi with what came before. When in doubt the text counts
+as meant for the assistant, and when the check fails the turn goes through.
+
+With speaker recognition (voice labels) the voice counts too: a voice the assistant knows by name is let through
+without a check; an unknown voice (often the TV) answering the remark must sound clearly meant for the assistant
+(`PI_BRIDGE_SCREEN_UNKNOWN_THRESHOLD`). Later in a conversation, pi itself decides when an unknown voice was not
+talking to it: it calls the `not_for_me` tool (a remark, or none) instead of answering, and the same short
+listening follows.
+
+What is playing helps too: with every voice request the integration says which media players are playing (or
+on), with their title, app or channel, and both the check and pi get that line ("Living room TV is playing:
+Markets, in YouTube."). By default every media player counts except the voice device's own, and only what is
+playing is sent. Choose the entities in the assistant's options ("Media players that may be what was heard"; a TV
+that is no media player in Home Assistant: its remote or plug) and "nothing is on" counts as well: then an unknown
+voice is more likely a person, and the stricter bar for unknown voices is not used.
 
 The filter is optional: it needs a classifier. That is TypeSafe's Jev when a TypeSafe API key is set
 (`TYPESAFE_API_KEY`: fast and cheap, but the heard text goes to api.typesafe.ai), or any classifier model in
@@ -176,7 +190,9 @@ Without any of these, nothing is screened.
 The filter needs to know where a conversation starts: an ESPHome satellite should start a new conversation per
 wake word (`id(va).reset_conversation_id();` before `voice_assistant.start`). A device with its own
 continuous-conversation mode can define a `pi_agent_dismiss` action (no variables), called when the
-conversation ends quietly, to end that mode too.
+conversation ends quietly, to end that mode too. To listen again after saying nothing, a device defines a `pi_agent_listen` action (no
+variables): it starts listening once more in the same conversation when the current run has ended (an empty
+reply ends a Home Assistant pipeline run for good). Without it, staying quiet ends the conversation.
 
 ### Sense of time, short-term memory and wake-ups
 
@@ -273,6 +289,7 @@ refreshes stop.
 | `warmup` | `PI_BRIDGE_WARMUP` | true | One throwaway turn at startup (same prompt and tools as the last real turn), so the model server has the long prompt cached before the first question |
 | `screenModel` | `PI_BRIDGE_SCREEN_MODEL` | Jev with `TYPESAFE_API_KEY`, else no screening | Noise filter classifier, e.g. `typesafe/jev-latest` or `llama.cpp/<model id>`; `text` = the chat model answers in text |
 | `screenThreshold` | `PI_BRIDGE_SCREEN_THRESHOLD` | 0.3 | Below this probability of "meant for the assistant" the text counts as background noise |
+| `screenUnknownThreshold` | `PI_BRIDGE_SCREEN_UNKNOWN_THRESHOLD` | 0.8 | The same for an unknown voice answering the remark about background noise (most likely the TV again) |
 | `timezone` | `PI_BRIDGE_TIMEZONE` | Home Assistant's | Time zone of the time line, the notes and wake-ups, e.g. `Europe/Copenhagen` (independent of the host's, which is often UTC) |
 | `memory` | `PI_BRIDGE_MEMORY` | true | Short-term memory note and the time in front of messages |
 | `memoryFile` | `PI_BRIDGE_MEMORY_FILE` | `<cwd>/short-term-memory.md` | Where the note is kept |
@@ -281,6 +298,9 @@ refreshes stop.
 | `wakeups` | `PI_BRIDGE_WAKEUPS` | true | The wake-up tools |
 | `speakerIdUrl` | `PI_BRIDGE_SPEAKER_ID_URL` | (none) | Base URL of the speaker recognition service: the voice tools |
 | `speakerIdToken` | `PI_BRIDGE_SPEAKER_ID_TOKEN` | (none) | Bearer token for it, if it has one |
+| `voiceAskAgainDays` | `PI_BRIDGE_VOICE_ASK_AGAIN_DAYS` | 30 | An unknown voice that was asked who it is (and did not say) is asked again after this many days. When it was asked is kept by the speaker recognition service (`POST speakers/asked`), so it survives restarts; the assistant is also told when it has heard a voice before |
+| `history` | `PI_BRIDGE_HISTORY` | true | Past conversations: the `conversation_search`, `conversation_read` and `conversation_delete` tools (delete only when asked, for good) |
+| `conversationKeepDays` | `PI_BRIDGE_CONVERSATION_KEEP_DAYS` | 30 | Saved conversations (pi's session files) are deleted after this many days without a change; 0 keeps them |
 | `autostart` | `PI_BRIDGE_AUTOSTART` | false | Start with interactive pi |
 | – | `HA_TOKEN` | – | Docker: a Home Assistant long-lived access token, for an MCP server entry in pi's `~/.pi/agent/mcp.json` (`"headers": {"Authorization": "Bearer ${HA_TOKEN}"}`), so the token stays out of prompts |
 

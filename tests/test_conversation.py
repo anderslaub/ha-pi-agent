@@ -279,6 +279,73 @@ async def test_noise_filter_remark_then_quiet_end(hass: HomeAssistant, bridge, s
     assert len(dismiss) == 1
 
 
+async def test_noise_filter_quiet_listen(hass: HomeAssistant, bridge, setup_entry) -> None:
+    """The assistant stays quiet about the TV: the device listens again, and what it hears next is screened."""
+    from homeassistant.helpers import device_registry as dr
+    from pytest_homeassistant_custom_component.common import MockConfigEntry
+
+    esphome_entry = MockConfigEntry(domain="esphome", data={"device_name": "kattio-box-2"})
+    esphome_entry.add_to_hass(hass)
+    device = dr.async_get(hass).async_get_or_create(
+        config_entry_id=esphome_entry.entry_id, identifiers={("esphome", "kattio2")}
+    )
+    listen = async_mock_service(hass, "esphome", "kattio_box_2_pi_agent_listen")
+
+    bridge.script = [{"t": "done", "screened": "listen"}]
+    first = await _say(hass, "and the financials", device_id=device.id)
+    assert first.response.speech["plain"]["speech"] == ""
+    assert len(listen) == 1
+
+    # someone it knows speaks: a retry with what came before (nothing was said)
+    bridge.script = [{"t": "text", "d": "What's up?"}, {"t": "done"}]
+    await _say(hass, "[Anders] hey", device_id=device.id, conversation_id=first.conversation_id)
+    assert bridge.turns[-1]["screen"] == "retry"
+    assert bridge.turns[-1]["screen_previous"] == {"heard": "and the financials", "said": ""}
+
+
+async def test_media_players_go_along(hass: HomeAssistant, bridge, setup_entry) -> None:
+    """Voice requests say what the media players play (not the voice device's own), so the TV can be told apart."""
+    from homeassistant.helpers import device_registry as dr, entity_registry as er
+    from pytest_homeassistant_custom_component.common import MockConfigEntry
+
+    esphome_entry = MockConfigEntry(domain="esphome", data={"device_name": "kattio-box-2"})
+    esphome_entry.add_to_hass(hass)
+    device = dr.async_get(hass).async_get_or_create(
+        config_entry_id=esphome_entry.entry_id, identifiers={("esphome", "kattio3")}
+    )
+    er.async_get(hass).async_get_or_create(
+        "media_player", "esphome", "box-speaker", device_id=device.id, suggested_object_id="box_speaker"
+    )
+    hass.states.async_set("media_player.box_speaker", "playing", {"friendly_name": "Box speaker"})
+    hass.states.async_set(
+        "media_player.tv", "playing", {"friendly_name": "Living room TV", "media_title": "Markets", "app_name": "YouTube"}
+    )
+    hass.states.async_set("media_player.kitchen", "off", {"friendly_name": "Kitchen"})
+
+    bridge.script = [{"t": "text", "d": "Hi"}, {"t": "done"}]
+    await _say(hass, "hello", device_id=device.id)
+    assert bridge.turns[-1]["media"] == [
+        {"name": "Living room TV", "state": "playing", "title": "Markets", "app": "YouTube"}
+    ]
+    # typed chat: nothing about media
+    await _say(hass, "hello")
+    assert "media" not in bridge.turns[-1]
+    # nothing playing among all media players proves nothing: not sent
+    hass.states.async_set("media_player.tv", "idle", {"friendly_name": "Living room TV"})
+    await _say(hass, "hello", device_id=device.id)
+    assert "media" not in bridge.turns[-1]
+    # chosen entities (a TV's remote too): nothing on is worth saying
+    hass.config_entries.async_update_entry(
+        setup_entry, options={**setup_entry.options, "media_players": ["media_player.tv", "remote.tv"]}
+    )
+    hass.states.async_set("remote.tv", "off", {"friendly_name": "TV remote"})
+    await _say(hass, "hello", device_id=device.id)
+    assert bridge.turns[-1]["media"] == []
+    hass.states.async_set("remote.tv", "on", {"friendly_name": "TV remote"})
+    await _say(hass, "hello", device_id=device.id)
+    assert bridge.turns[-1]["media"] == [{"name": "TV remote", "state": "on"}]
+
+
 async def test_noise_filter_skips_follow_ups_and_text_chat(hass: HomeAssistant, bridge, setup_entry) -> None:
     bridge.script = [{"t": "text", "d": "Sure. Anything else?"}, {"t": "done"}]
     first = await _say(hass, "turn on the light", device_id="dev1")

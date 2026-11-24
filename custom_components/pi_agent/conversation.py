@@ -21,7 +21,9 @@ from .const import (
     CONF_BUDGET,
     CONF_BUSY_MESSAGE,
     CONF_DETACH_MESSAGE,
+    CONF_MEDIA_PLAYERS,
     CONF_NOISE_FILTER,
+    CONF_CONVERSATION,
     CONF_PROMPT,
     CONF_RESET_HOURS,
     CONF_SESSION_MODE,
@@ -32,7 +34,7 @@ from .const import (
     NOISE_RETRY_SECONDS,
     SESSION_PER_DEVICE,
 )
-from .satellite import async_dismiss, async_set_working
+from .satellite import async_dismiss, async_listen, async_set_working, media_now
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -121,6 +123,13 @@ class PiAgentConversationEntity(
             request["cwd"] = workspace
         if options[CONF_NOISE_FILTER]:
             self._add_screening(request, user_input, chat_log)
+        if user_input.satellite_id or user_input.device_id:
+            # what may be making sound in the house, so an unknown voice can be told from the TV or the radio
+            media = media_now(
+                self.hass, list(options[CONF_MEDIA_PLAYERS] or []), user_input.satellite_id, user_input.device_id
+            )
+            if media is not None:
+                request["media"] = media
         return request
 
     def _add_screening(
@@ -195,7 +204,11 @@ class PiAgentConversationEntity(
         )
         if not isinstance(chat_log.content[-1], conversation.AssistantContent):
             return _error_result(user_input, chat_log, "Sorry, pi did not answer.")
-        return conversation.async_get_result_from_chat_log(user_input, chat_log)
+        result = conversation.async_get_result_from_chat_log(user_input, chat_log)
+        if {**DEFAULT_OPTIONS, **self.entry.options}[CONF_CONVERSATION] and not turn.detached:
+            # A conversation: the voice device listens again after every answer. Saying nothing ends it.
+            result.continue_conversation = True
+        return result
 
     async def _screened_result(
         self,
@@ -204,22 +217,36 @@ class PiAgentConversationEntity(
         turn: _Turn,
         source: str,
     ) -> conversation.ConversationResult:
-        """The text was background noise: say the remark and listen for the answer, or end quietly."""
+        """The text was background noise: say the remark and listen, listen without a word, or end quietly."""
         response = intent.IntentResponse(language=user_input.language)
         remark = "".join(turn.reply).strip()
         if debug.enabled(self.entry):
             debug.log(self.hass, self.entry, f"Timing ({source}): {debug.timing_summary(turn.timeline())}")
-        if turn.screened == "noise":
-            # The next text in this conversation is the answer to the remark: screened too
+        if turn.screened in ("noise", "listen"):
+            # Whatever is heard next in this conversation is screened too: someone pi knows gets through
             self.entry.runtime_data.noise[chat_log.conversation_id] = {
                 "at": time.monotonic(),
                 "heard": user_input.text,
-                "said": remark,
+                "said": remark if turn.screened == "noise" else "",
             }
-            debug.log(self.hass, self.entry, f"Background noise? ({source}) pi asked: {remark}")
+        if turn.screened == "noise":
+            debug.log(self.hass, self.entry, f"Background noise? ({source}) pi said: {remark}")
             response.async_set_speech(remark)
             return conversation.ConversationResult(
                 response=response, conversation_id=chat_log.conversation_id, continue_conversation=True
+            )
+        if turn.screened == "listen":
+            # Nothing to say: the device listens again by itself (an empty reply ends a pipeline run for good)
+            used = await async_listen(self.hass, user_input.satellite_id, user_input.device_id)
+            debug.log(
+                self.hass,
+                self.entry,
+                f"Background noise? ({source}) pi stays quiet and "
+                f"{f'listens (esphome.{used})' if used else 'the conversation ends (no listen action on the device)'}",
+            )
+            response.async_set_speech("")
+            return conversation.ConversationResult(
+                response=response, conversation_id=chat_log.conversation_id, continue_conversation=False
             )
         # Noise again: stop listening without a word (and end the device's own chat mode, if it has one)
         used = await async_dismiss(self.hass, user_input.satellite_id, user_input.device_id)
@@ -298,7 +325,8 @@ class _Turn:
         self.reply: list[str] = []
         self.tools: list[str] = []
         self.detached = False
-        # noise filter verdict from the bridge: "noise" (a remark was made) or "dismiss" (end quietly)
+        # noise filter verdict from the bridge: "noise" (a remark was made), "listen" (nothing said, listen on)
+        # or "dismiss" (end quietly)
         self.screened: str | None = None
         # (seconds since the request, text) as each piece arrived from the bridge
         self.texts: list[tuple[float, str]] = []

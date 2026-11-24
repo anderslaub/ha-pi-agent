@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { AskedVoices, filterVoices, parseLabels, stripLabels, unknownSpeakerNote } from "../src/voices.ts";
+import { filterVoices, parseLabels, speakerKind, stripLabels, unknownSpeakerNote, VoiceAsker } from "../src/voices.ts";
+import type { UnknownVoice } from "../src/voices.ts";
 
 test("labels are read: known names and unknown voice ids", () => {
   assert.deepEqual(parseLabels("[Anders] tænd lyset [unknown voice 3F2A] og nu til vejret"), [
@@ -30,12 +31,50 @@ test("text without labels passes unchanged", () => {
   assert.equal(stripLabels("hej"), "hej");
 });
 
-test("ask who is speaking once per voice per day", () => {
-  const asked = new AskedVoices(1000);
-  assert.equal(asked.shouldAsk("3f2a", 0), true);
-  assert.equal(asked.shouldAsk("3f2a", 500), false);
-  assert.equal(asked.shouldAsk("beef", 500), true);
-  assert.equal(asked.shouldAsk("3f2a", 2000), true);
-  assert.match(unknownSpeakerNote("3f2a", true), /Ask who is speaking.*voice_learn \(voice "3f2a"\)/);
+test("ask who is speaking once, and again only after a while; the service keeps when", async () => {
+  const DAY = 86_400_000;
+  const stored = new Map<string, UnknownVoice>([["3f2a", { id: "3f2a", count: 1, first_seen: 0, last_seen: 0 }]]);
+  const client = {
+    list: async () => ({ known: [], recent: [...stored.values()] }),
+    asked: async (id: string) => {
+      const v = stored.get(id)!;
+      v.asked = now / 1000;
+      return v;
+    },
+  };
+  let now = 10 * DAY;
+  const asker = new VoiceAsker(client, 30 * DAY);
+  assert.equal((await asker.decide("3f2a", now)).ask, true);
+  now += DAY;
+  const later = await asker.decide("3f2a", now);
+  assert.equal(later.ask, false);
+  assert.equal(later.askedBefore, 10 * DAY);
+  // a new bridge (restart) still knows: the service kept it
+  assert.equal((await new VoiceAsker(client, 30 * DAY).decide("3f2a", now)).ask, false);
+  now += 40 * DAY;
+  assert.equal((await asker.decide("3f2a", now)).ask, true);
+  // a service without the asked route: remembered in memory
+  const bare = new VoiceAsker({ list: async () => ({ known: [], recent: [] }), asked: async () => { throw new Error("404"); } }, DAY);
+  assert.equal((await bare.decide("beef", 0)).ask, true);
+  assert.equal((await bare.decide("beef", 1000)).ask, false);
+
+  assert.match(unknownSpeakerNote("3f2a", true), /ask who is speaking.*voice_learn \(voice "3f2a"\)/);
+  assert.match(unknownSpeakerNote("3f2a", true), /the TV.*not_for_me/);
+  assert.match(unknownSpeakerNote("3f2a", false), /not_for_me.*Do not ask who it is again/);
+  assert.match(unknownSpeakerNote("3f2a", false, Date.now(), "TV is on."), /TV is on\. It may well be the TV/);
   assert.doesNotMatch(unknownSpeakerNote("3f2a", false), /Ask who/);
+  const met = unknownSpeakerNote(
+    "3f2a",
+    { ask: false, voice: { id: "3f2a", count: 7, first_seen: Date.UTC(2026, 9, 3) / 1000 }, askedBefore: Date.UTC(2026, 9, 3) },
+    Date.UTC(2026, 10, 23),
+  );
+  assert.match(met, /heard this voice before \(first on 2026-10-03, 7 times\)/);
+  assert.match(met, /asked who it was on 2026-10-03/);
+});
+
+test("whose voice starts a transcript", () => {
+  assert.equal(speakerKind("[Anders] hi"), "known");
+  assert.equal(speakerKind("[unknown voice 3f2a] hi [Anders] yes"), "unknown");
+  assert.equal(speakerKind("[?] hi"), undefined);
+  assert.equal(speakerKind("hi"), undefined);
 });

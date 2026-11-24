@@ -16,6 +16,12 @@ services:
     image: pi-va-bridge
     container_name: pi-va-bridge
     restart: unless-stopped
+    # The container log has what was heard and said: keep at most 3 x 10 MB
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     ports:
       - "${PI_BRIDGE_PORT:-8787}:8787"
     # Lets the container reach services on the Docker host, e.g. LLAMA_BASE_URL=http://host.docker.internal:8080
@@ -43,6 +49,7 @@ services:
       # without one (and no PI_BRIDGE_SCREEN_MODEL) nothing is screened
       PI_BRIDGE_SCREEN_MODEL: ${PI_BRIDGE_SCREEN_MODEL:-}
       PI_BRIDGE_SCREEN_THRESHOLD: ${PI_BRIDGE_SCREEN_THRESHOLD:-0.3}
+      PI_BRIDGE_SCREEN_UNKNOWN_THRESHOLD: ${PI_BRIDGE_SCREEN_UNKNOWN_THRESHOLD:-0.8}
       TYPESAFE_API_KEY: ${TYPESAFE_API_KEY:-}
       # Sense of time, short-term memory, wake-ups (README "Sense of time, short-term memory and wake-ups")
       # Empty: Home Assistant's time zone
@@ -54,6 +61,11 @@ services:
       # the speaker recognition service behind a speech-to-text that labels who is speaking (empty: no voice tools)
       PI_BRIDGE_SPEAKER_ID_URL: ${PI_BRIDGE_SPEAKER_ID_URL:-}
       PI_BRIDGE_SPEAKER_ID_TOKEN: ${PI_BRIDGE_SPEAKER_ID_TOKEN:-}
+      # an unknown voice is asked who it is again after this many days
+      PI_BRIDGE_VOICE_ASK_AGAIN_DAYS: ${PI_BRIDGE_VOICE_ASK_AGAIN_DAYS:-30}
+      # Past conversations: the assistant can search, read and delete them; deleted after this many days (0: never)
+      PI_BRIDGE_HISTORY: ${PI_BRIDGE_HISTORY:-1}
+      PI_BRIDGE_CONVERSATION_KEEP_DAYS: ${PI_BRIDGE_CONVERSATION_KEEP_DAYS:-30}
       # Long-lived Home Assistant access token, for pi's mcp.json ("Authorization": "Bearer ${HA_TOKEN}"):
       # keeps the token out of prompts and config files
       HA_TOKEN: ${HA_TOKEN:-}

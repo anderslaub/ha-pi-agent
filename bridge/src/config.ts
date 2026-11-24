@@ -28,6 +28,8 @@ export interface BridgeConfig {
   screenModel?: string;
   /** below this probability of "meant for the assistant" the speech counts as background noise */
   screenThreshold: number;
+  /** ... for an unknown voice answering the assistant's remark about background noise (most likely the TV again) */
+  screenUnknownThreshold: number;
   /**
    * IANA time zone for the assistant's sense of time (the time, dates in its notes, wake-ups). Unset: Home
    * Assistant's time zone (sent with each turn), else the host's.
@@ -51,6 +53,12 @@ export interface BridgeConfig {
   speakerIdUrl?: string;
   /** bearer token for the speaker recognition service, if it has one */
   speakerIdToken?: string;
+  /** an unknown voice is asked who it is again after this many days (it was asked before, and did not say) */
+  voiceAskAgainDays: number;
+  /** the conversation tools (history.ts): past conversations can be searched, read and deleted */
+  history: boolean;
+  /** saved conversations (pi's session files) are deleted after this many days; 0: kept for ever */
+  conversationKeepDays: number;
   /** extension only: start the bridge when an interactive pi starts */
   autostart: boolean;
 }
@@ -70,6 +78,7 @@ export interface ConfigFile {
   warmup?: boolean;
   screenModel?: string;
   screenThreshold?: number;
+  screenUnknownThreshold?: number;
   timezone?: string;
   memory?: boolean;
   memoryFile?: string;
@@ -78,8 +87,15 @@ export interface ConfigFile {
   wakeups?: boolean;
   speakerIdUrl?: string;
   speakerIdToken?: string;
+  voiceAskAgainDays?: number;
+  history?: boolean;
+  conversationKeepDays?: number;
   autostart?: boolean;
 }
+
+/** A number setting where 0 is a valid value */
+const num = (env: string | undefined, file: number | undefined, def: number) =>
+  env !== undefined && env !== "" ? Number(env) : file ?? def;
 
 export const DEFAULT_CWD = "~/pi-va";
 
@@ -131,6 +147,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, file = configPa
     warmup: env.PI_BRIDGE_WARMUP ? env.PI_BRIDGE_WARMUP !== "0" : f.warmup !== false,
     screenModel: env.PI_BRIDGE_SCREEN_MODEL || f.screenModel || undefined,
     screenThreshold: Number(env.PI_BRIDGE_SCREEN_THRESHOLD || f.screenThreshold || 0.3),
+    screenUnknownThreshold: Number(env.PI_BRIDGE_SCREEN_UNKNOWN_THRESHOLD || f.screenUnknownThreshold || 0.8),
     timezone: env.PI_BRIDGE_TIMEZONE || f.timezone || undefined,
     memory: env.PI_BRIDGE_MEMORY ? env.PI_BRIDGE_MEMORY !== "0" : f.memory !== false,
     // in the workspace, so it can be read (and corrected) from the host
@@ -140,6 +157,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, file = configPa
     wakeups: env.PI_BRIDGE_WAKEUPS ? env.PI_BRIDGE_WAKEUPS !== "0" : f.wakeups !== false,
     speakerIdUrl: env.PI_BRIDGE_SPEAKER_ID_URL || f.speakerIdUrl || undefined,
     speakerIdToken: env.PI_BRIDGE_SPEAKER_ID_TOKEN || f.speakerIdToken || undefined,
+    voiceAskAgainDays: num(env.PI_BRIDGE_VOICE_ASK_AGAIN_DAYS, f.voiceAskAgainDays, 30),
+    history: env.PI_BRIDGE_HISTORY ? env.PI_BRIDGE_HISTORY !== "0" : f.history !== false,
+    conversationKeepDays: num(env.PI_BRIDGE_CONVERSATION_KEEP_DAYS, f.conversationKeepDays, 30),
     autostart: env.PI_BRIDGE_AUTOSTART ? env.PI_BRIDGE_AUTOSTART === "1" : Boolean(f.autostart),
   };
 }
