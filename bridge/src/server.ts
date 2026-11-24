@@ -68,6 +68,7 @@ import { describeWakeup, MAX_LATE_MS, WakeupStore } from "./wakeups.ts";
 import type { Wakeup } from "./wakeups.ts";
 import { TurnTiming } from "./timing.ts";
 import { Gate, sameRequest } from "./speculation.ts";
+import type { VoicePart } from "./voices.ts";
 import { filterVoices, LABELS_EXPLAINED, speakerKind, unknownSpeakerNote, VoiceAsker, VoiceIndexClient } from "./voices.ts";
 import * as history from "./history.ts";
 
@@ -231,6 +232,8 @@ interface Entry {
   language?: string;
   satellite_id?: string | null;
   device_id?: string | null;
+  /** the voice that spoke the request being answered (from Home Assistant's transcript): only it can be named */
+  speaking?: VoicePart;
 }
 
 /** pi's own SYSTEM.md that replaces its base prompt, if any (project before global, like pi) */
@@ -522,7 +525,7 @@ export class Bridge {
             ? [{ name: "va-bridge-wakeups", hidden: true, factory: (pi: any) => this.registerWakeupTools(pi, holder) }]
             : []),
           ...(this.voices
-            ? [{ name: "va-bridge-voices", hidden: true, factory: (pi: any) => this.registerVoiceTools(pi) }]
+            ? [{ name: "va-bridge-voices", hidden: true, factory: (pi: any) => this.registerVoiceTools(pi, holder) }]
             : []),
           ...(this.cfg.history
             ? [{ name: "va-bridge-history", hidden: true, factory: (pi: any) => this.registerHistoryTools(pi, holder) }]
@@ -787,7 +790,7 @@ ${text}`;
 
   // ------------------------------------------------------------------------------------------ voices
 
-  private registerVoiceTools(pi: any): void {
+  private registerVoiceTools(pi: any, holder: { entry?: Entry }): void {
     const voices = this.voices!;
     const text = (t: string) => ({ content: [{ type: "text", text: t }], details: {} });
     pi.registerTool({
@@ -796,7 +799,9 @@ ${text}`;
       description:
         `${LABELS_EXPLAINED} When someone tells you who they are (or who is speaking), remember their voice: ` +
         'the voice id from the label (e.g. "3f2a" from [unknown voice 3f2a]) and their name. Next time their ' +
-        "words come labelled with the name. Also to rename a known voice (voice = the old name).",
+        "words come labelled with the name. Only the voice of the person telling you, in what they say now (never a " +
+        "voice heard earlier, e.g. from the TV). A known name again (\"it's me, Anders\" from an unknown voice) adds " +
+        "that recording to them, if it sounds like them. Also to rename a known voice (voice = the old name).",
       promptSnippet: "Remember who a voice belongs to ([unknown voice 3f2a] -> a name)",
       parameters: {
         type: "object",
@@ -807,12 +812,29 @@ ${text}`;
         required: ["voice", "name"],
       },
       execute: async (_id: string, params: { voice: string; name: string }) => {
+        // only the voice that is talking now can be named: never one heard earlier (the TV, someone else)
+        const id = params.voice.trim().toLowerCase().replace(/^unknown voice\s*/, "");
+        const now = holder.entry?.speaking;
+        if (/^[0-9a-f]{4}$/.test(id) && now && now.id !== id) {
+          this.log.info(`voice_learn refused: ${id} is not the voice speaking now (${now.id ?? now.name})`);
+          return text(
+            `Not remembered: voice ${id} is not the one speaking to you now (that is ${now.id ? `unknown voice ${now.id}` : now.name}). ` +
+              "Only the voice that tells you who it is can be named: if this is them, use that id.",
+          );
+        }
         try {
           const r = await voices.learn(params.voice, params.name);
           this.log.info(`voice ${params.voice} is now ${r.name}`);
           return text(`Remembered: that voice is ${r.name}.`);
         } catch (err) {
-          return text(`Could not remember the voice: ${(err as Error).message}`);
+          const msg = (err as Error).message;
+          if (/does not sound like/.test(msg)) {
+            return text(
+              `Not remembered: ${msg}. Say that you did not recognise the voice as theirs, and if it really is them, ` +
+                "ask them to say a longer sentence and try again with that voice.",
+            );
+          }
+          return text(`Could not remember the voice: ${msg}`);
         }
       },
     });
@@ -1225,6 +1247,7 @@ ${text}`;
       return;
     }
     entry.lastUsed = Date.now();
+    entry.speaking = filterVoices(text).speaker;
     timing.session_ready = timing.now();
 
     // Speaker labels from the speech-to-text: background voices out, "who is speaking?" for an unknown voice
