@@ -28,7 +28,15 @@ The same assistant can also be used as a text chat, so write replies that work b
   what you are going to do. If it takes long, the user is told that you are working on it and your final
   message is delivered to them later, so make the final message a short summary of the outcome.
 - Ask a short question when the request is ambiguous; a reply that ends with a question mark keeps the
-  conversation open for the answer.`;
+  conversation open for the answer.
+
+Home control (lights, switches, media, climate, covers and so on):
+- Just do it with the Home Assistant action tools. When an area and a kind of device are named, act on all of
+  them in one call by area and domain (for example "turn on the lights in the living room": turn on, area
+  living room, domain light). Do not look up, list or read out entity names first, and do not ask which ones.
+- Then confirm in one short sentence. Only if some failed or are unavailable, mention which, briefly, after
+  saying what you did.
+- This is quick work: do not announce that you are going to check first.`;
 
 export function promptCandidates(cwd: string, agentDir: string): string[] {
   return [path.join(cwd, CONFIG_DIR_NAME, PROMPT_DIR, "SYSTEM.md"), path.join(agentDir, PROMPT_DIR, "SYSTEM.md")];
