@@ -11,7 +11,7 @@ from homeassistant.components import conversation
 from homeassistant.const import MATCH_ALL
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import TemplateError
-from homeassistant.helpers import intent, template
+from homeassistant.helpers import intent, llm, template
 from homeassistant.helpers.device_registry import DeviceEntryType, DeviceInfo
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
@@ -285,7 +285,15 @@ class PiAgentConversationEntity(
                     yield {"content": text}
             elif kind == "activity":
                 turn.tools.append(str(event.get("d")))
-                yield {"thinking_content": f"{event.get('d')}\n"}
+                delta: conversation.AssistantContentDeltaDict = {"thinking_content": f"{event.get('d')}\n"}
+                if spoke:
+                    # pi works on after saying something ("Let me check."): an (external, pi's own) tool call
+                    # is what makes the voice pipeline start speaking what was said so far, instead of
+                    # waiting for 60 characters, which would only come with the answer after the work
+                    delta["tool_calls"] = [
+                        llm.ToolInput(tool_name="pi", tool_args={"activity": str(event.get("d"))}, external=True)
+                    ]
+                yield delta
             elif kind == "detached":
                 text = event.get("d") or ""
                 turn.detached = True

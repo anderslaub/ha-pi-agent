@@ -102,7 +102,7 @@ function builtInExtensions(log: Logger): Promise<InlineExtension[]> {
   return builtins;
 }
 
-export const BRIDGE_VERSION = "0.8.0";
+export const BRIDGE_VERSION = "0.8.1";
 
 export interface Logger {
   info(msg: string): void;
@@ -194,6 +194,8 @@ interface Run {
   gate?: Gate;
   /** pi called not_for_me: what it heard was not said to it (the remark to make, "" for none) */
   notForMe?: string;
+  /** Home Assistant dropped the request before the answer was done (the voice device was interrupted): aborting */
+  abandoned?: boolean;
 }
 
 /** The voice label a transcript starts with ("[Anders] ..." -> "Anders"), "" for none */
@@ -1290,6 +1292,15 @@ ${text}`;
     entry.started ??= Date.now();
     entry.device = req.satellite_id ?? req.device_id ?? entry.device;
 
+    // The answer before was cut off (someone interrupted it: Home Assistant dropped its request) and is still
+    // being aborted: this request is what they said instead, so wait for that rather than queue behind it
+    if (entry.run?.abandoned && entry.run !== early?.run) {
+      const t0 = Date.now();
+      void entry.session.abort().catch(() => undefined);
+      while (entry.run?.abandoned && Date.now() - t0 < 5000) await new Promise((r) => setTimeout(r, 50));
+      this.log.info(`${key}: waited ${Date.now() - t0} ms for the interrupted answer to stop`);
+    }
+
     // Still working on an earlier (detached) request: queue this one behind it
     if (entry.run && entry.run !== early?.run) {
       entry.run.meta = meta;
@@ -1362,6 +1373,7 @@ ${text}`;
     res.on("close", () => {
       if (!run.detached && !res.writableFinished && entry.run === run) {
         this.log.info(`${key}: client went away, aborting`);
+        run.abandoned = true;
         void entry.session.abort();
       }
     });

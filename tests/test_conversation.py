@@ -4,6 +4,7 @@ import asyncio
 
 from homeassistant.components import conversation
 from homeassistant.core import Context, HomeAssistant
+from homeassistant.helpers import chat_session
 
 from pytest_homeassistant_custom_component.common import async_capture_events, async_mock_service
 
@@ -34,6 +35,28 @@ async def test_streamed_reply(hass: HomeAssistant, bridge, setup_entry) -> None:
     assert sent["session_key"] == f"conversation:{result.conversation_id}"
     assert sent["budget_s"] == 15
     assert sent["time_zone"] == hass.config.time_zone
+
+
+async def test_tool_use_after_words_starts_the_speech(hass: HomeAssistant, bridge, setup_entry) -> None:
+    """A short "Let me check." before the work goes to the chat log with a tool call (run by pi): that is what
+    lets the voice pipeline speak it at once instead of after the work."""
+    bridge.script = [
+        {"t": "activity", "d": "memory: search"},
+        {"t": "text", "d": "Let me check. "},
+        {"t": "activity", "d": "bash: ls"},
+        {"t": "text", "d": "Done."},
+        {"t": "done"},
+    ]
+    result = await _say(hass, "check it", device_id="dev1")
+    assert result.response.speech["plain"]["speech"] == "Let me check. Done."
+    with (
+        chat_session.async_get_chat_session(hass, result.conversation_id) as session,
+        conversation.async_get_chat_log(hass, session) as chat_log,
+    ):
+        answer = chat_log.content[-1]
+    calls = answer.tool_calls or []
+    # only the tool used after something was said
+    assert [(c.tool_name, c.tool_args, c.external) for c in calls] == [("pi", {"activity": "bash: ls"}, True)]
 
 
 async def test_session_per_device(hass: HomeAssistant, bridge, setup_entry) -> None:
