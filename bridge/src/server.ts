@@ -71,6 +71,7 @@ import { Gate, sameRequest } from "./speculation.ts";
 import type { VoicePart } from "./voices.ts";
 import { filterVoices, LABELS_EXPLAINED, speakerKind, unknownSpeakerNote, VoiceAsker, VoiceIndexClient } from "./voices.ts";
 import * as history from "./history.ts";
+import { ConversationFiles } from "./resume.ts";
 
 /**
  * pi's built-in extensions (llama.cpp provider, mcp, tool-search, ...). The pi CLI loads them into every
@@ -289,6 +290,8 @@ export class Bridge {
   private interruption?: { who?: string; text: string; heard_part?: string; at: number };
   /** the speaker recognition service (voice tools), when PI_BRIDGE_SPEAKER_ID_URL is set */
   private voices?: VoiceIndexClient;
+  /** which saved session continues which conversation (resume.ts) */
+  private conversationFiles: ConversationFiles;
   /** whether to ask an unknown voice who it is (again) */
   private asker?: VoiceAsker;
   /** Home Assistant's time zone from the last turn (remembered across restarts in the warm-up file) */
@@ -313,6 +316,7 @@ export class Bridge {
       // no turn yet
     }
     this.wakeups = new WakeupStore(path.join(getAgentDir(), "va-bridge-wakeups.json"));
+    this.conversationFiles = new ConversationFiles(path.join(getAgentDir(), "va-bridge-conversations.json"));
     if (cfg.speakerIdUrl) {
       this.voices = new VoiceIndexClient(cfg.speakerIdUrl, cfg.speakerIdToken);
       this.asker = new VoiceAsker(this.voices, cfg.voiceAskAgainDays * 86_400_000);
@@ -557,10 +561,24 @@ export class Bridge {
       model = r.model;
       thinkingLevel ??= r.thinkingLevel as never;
     }
+    // a conversation the bridge let go of (quiet for a while, or a restart) continues in its saved session
+    const resumeFile = ConversationFiles.resumable(key) ? this.conversationFiles.get(key) : undefined;
+    let sessionManager: SessionManager;
+    if (key === WARMUP_KEY) {
+      sessionManager = SessionManager.inMemory(cwd); // the warm-up session leaves no history behind
+    } else if (resumeFile) {
+      try {
+        sessionManager = SessionManager.open(resumeFile, undefined, cwd);
+      } catch (err) {
+        this.log.error(`could not open ${resumeFile} to continue ${key}, starting fresh`, err);
+        sessionManager = SessionManager.create(cwd);
+      }
+    } else {
+      sessionManager = SessionManager.create(cwd);
+    }
     const { session } = await createAgentSessionFromServices({
       services,
-      // the warm-up session leaves no history behind
-      sessionManager: key === WARMUP_KEY ? SessionManager.inMemory(cwd) : SessionManager.create(cwd),
+      sessionManager,
       ...(model ? { model } : {}),
       ...(thinkingLevel ? { thinkingLevel } : {}),
       // a restricted tool list (PI_BRIDGE_TOOLS) still gets the bridge's own tools
@@ -580,19 +598,25 @@ export class Bridge {
       mode: "print",
       onError: (err) => this.log.error(`extension error (${err.extensionPath}): ${err.error}`),
     });
+    const resumed = !!resumeFile && session.messages.length > 0;
+    const sessionFile = session.sessionFile;
+    if (sessionFile && key !== WARMUP_KEY) this.conversationFiles.set(key, sessionFile);
     const entry: Entry = {
       key,
       session,
       lastUsed: Date.now(),
       turns: 0,
-      contextSent: false,
+      // a continued conversation already had the context block in its first message
+      contextSent: resumed,
       language: req.language,
       satellite_id: req.satellite_id,
       device_id: req.device_id,
     };
     holder.entry = entry;
     session.subscribe((event) => this.onEvent(entry, event as never));
-    this.log.info(`session ${session.sessionId} for ${key} (cwd ${cwd}, system prompt ${section.path ?? "built-in"})`);
+    this.log.info(
+      `session ${session.sessionId} for ${key}${resumed ? " (continued)" : ""} (cwd ${cwd}, system prompt ${section.path ?? "built-in"})`,
+    );
     return entry;
   }
 

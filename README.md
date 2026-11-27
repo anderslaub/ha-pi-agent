@@ -21,7 +21,9 @@ The repository is two things at once: a HACS integration (`custom_components/pi_
 ## Features
 
 - **Real pi sessions.** Each conversation is a normal pi session saved to disk, so you can resume it at
-  the keyboard with `pi -r`.
+  the keyboard with `pi -r`. A conversation that comes back later (a client continuing an old conversation id,
+  even after a bridge restart) continues in its saved session, for as long as the session is kept
+  (`PI_BRIDGE_CONVERSATION_KEEP_DAYS`).
 - **Streaming.** Spoken text streams into Home Assistant as it's generated, so streaming TTS starts
   talking right away. Tool use shows up as "thinking" in the Assist debug view and isn't spoken.
 - **Speech-friendly.** Pi is told it's speaking. Markdown, code blocks, tables and URLs are stripped
