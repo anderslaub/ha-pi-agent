@@ -105,13 +105,34 @@ export function timePrefix(now: Date, tz: string): string {
   return `[Time: ${hhmm(now, tz)}]`;
 }
 
-/** A user message without the context block or time prefix the bridge put in front */
+/**
+ * Who sent the message: the Home Assistant user logged in where it was typed or said (the Home Assistant app, the
+ * page). Voice devices have none (their speech-to-text may label the voices instead).
+ */
+export function userNote(name: string): string {
+  return `[Home Assistant user: ${name.replace(/[\[\]]/g, "").trim()}]`;
+}
+
+const USER_NOTE = /^\s*\[Home Assistant user: ([^\]]*)\]\s*/;
+
+/** The user named in front of a message (see userNote), if any */
+export function noteUser(text: string): string | undefined {
+  return USER_NOTE.exec(text.replace(/^\s*\[Time: \d{1,2}:\d{2}\]\s*/, ""))?.[1]?.trim() || undefined;
+}
+
+function stripContextBlock(text: string): string {
+  const a = text.indexOf(CONTEXT_START);
+  const b = text.indexOf(CONTEXT_END);
+  return a >= 0 && b > a ? text.slice(0, a) + text.slice(b + CONTEXT_END.length) : text;
+}
+
+/** A user message without the context block, time prefix or user note the bridge put in front */
 export function stripContext(text: string): string {
   let s = text;
   const a = s.indexOf(CONTEXT_START);
   const b = s.indexOf(CONTEXT_END);
   if (a >= 0 && b > a) s = s.slice(0, a) + s.slice(b + CONTEXT_END.length);
-  return s.replace(/^\s*\[Time: \d{1,2}:\d{2}\]\s*/, "").trim();
+  return s.replace(/^\s*\[Time: \d{1,2}:\d{2}\]\s*/, "").replace(USER_NOTE, "").trim();
 }
 
 type Part = { type?: string; text?: string; name?: string; arguments?: Record<string, unknown> };
@@ -131,8 +152,10 @@ export function transcript(
   for (const raw of messages) {
     const m = raw as Msg;
     if (m.role === "user") {
-      const text = stripContext(partsOf(m).map((p) => (p.type === "text" ? p.text ?? "" : "")).join(" "));
-      if (text) lines.push(`User: ${short(text, 600)}`);
+      const raw = partsOf(m).map((p) => (p.type === "text" ? p.text ?? "" : "")).join(" ");
+      const text = stripContext(raw);
+      const who = noteUser(stripContextBlock(raw));
+      if (text) lines.push(`User${who ? ` (${who})` : ""}: ${short(text, 600)}`);
     } else if (m.role === "assistant") {
       for (const p of partsOf(m)) {
         if (p.type === "text" && p.text?.trim()) lines.push(`Assistant: ${short(p.text.trim(), 800)}`);

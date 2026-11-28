@@ -132,6 +132,17 @@ class PiAgentConversationEntity(
                 request["media"] = media
         return request
 
+    async def _user_name(self, user_input: conversation.ConversationInput) -> str | None:
+        """The name of the Home Assistant user who sent it (the app, a dashboard, the Kattio page). Voice devices
+        and automations have no user."""
+        user_id = user_input.context.user_id
+        if not user_id:
+            return None
+        user = await self.hass.auth.async_get_user(user_id)
+        if user is None or user.system_generated or not user.name:
+            return None
+        return user.name
+
     def _add_screening(
         self,
         request: dict[str, Any],
@@ -166,6 +177,9 @@ class PiAgentConversationEntity(
             request = self._build_request(user_input, chat_log)
         except TemplateError as err:
             return _error_result(user_input, chat_log, f"Sorry, I had a problem with my template: {err}")
+        if name := await self._user_name(user_input):
+            # who is writing (or talking in the Home Assistant app): the assistant can't tell from the words
+            request["user"] = {"name": name}
 
         source = user_input.satellite_id or user_input.device_id or "text"
         debug.log(self.hass, self.entry, f"Heard ({source}): {user_input.text}")

@@ -35,6 +35,15 @@ async def test_streamed_reply(hass: HomeAssistant, bridge, setup_entry) -> None:
     assert sent["session_key"] == f"conversation:{result.conversation_id}"
     assert sent["budget_s"] == 15
     assert sent["time_zone"] == hass.config.time_zone
+    assert "user" not in sent  # no Home Assistant user (as from a voice device)
+
+
+async def test_the_users_name_goes_along(hass: HomeAssistant, bridge, setup_entry) -> None:
+    """Typed in the Home Assistant app (or a page): the assistant is told who it is"""
+    bridge.script = [{"t": "text", "d": "Hi Jonas."}, {"t": "done"}]
+    jonas = await hass.auth.async_create_user("Jonas")
+    await conversation.async_converse(hass, "hi", None, Context(user_id=jonas.id), agent_id=AGENT)
+    assert bridge.turns[-1]["user"] == {"name": "Jonas"}
 
 
 async def test_tool_use_after_words_starts_the_speech(hass: HomeAssistant, bridge, setup_entry) -> None:

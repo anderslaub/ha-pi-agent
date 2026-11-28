@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { calendar, lastConversationLine, nowLine, parseWhen, stamp, validTimeZone } from "../src/clock.ts";
-import { cleanNote, contextBlock, readNote, stripContext, transcript, writeNote } from "../src/memory.ts";
+import { cleanNote, contextBlock, noteUser, readNote, stripContext, transcript, userNote, writeNote } from "../src/memory.ts";
 import { describeWakeup, WakeupStore } from "../src/wakeups.ts";
 
 const TZ = "Europe/Copenhagen";
@@ -56,6 +56,15 @@ test("memory: note file, context block, and stripping the block from transcripts
   assert.doesNotMatch(block, /Last conversation:/);
   assert.equal(stripContext(`${block}\n\nturn on the light`), "turn on the light");
   assert.equal(stripContext("[Time: 07:45] and the kitchen"), "and the kitchen");
+  assert.equal(userNote("Jonas [admin]"), "[Home Assistant user: Jonas admin]");
+  assert.equal(stripContext(`${block}\n\n${userNote("Jonas")} hi`), "hi");
+  assert.equal(stripContext(`[Time: 07:45] ${userNote("Jonas")} and the kitchen`), "and the kitchen");
+  assert.equal(noteUser(`[Time: 07:45] ${userNote("Jonas")} and the kitchen`), "Jonas");
+  assert.equal(noteUser("[Time: 07:45] and the kitchen"), undefined);
+  assert.equal(
+    transcript([{ role: "user", content: `${block}\n\n${userNote("Jonas")} who am I?` }], () => ""),
+    "User (Jonas): who am I?",
+  );
   const t = transcript(
     [
       { role: "user", content: `${block}\n\nwhat's new` },

@@ -62,6 +62,7 @@ import {
   summaryPrompt,
   timePrefix,
   transcript,
+  userNote,
   writeNote,
 } from "./memory.ts";
 import { describeWakeup, MAX_LATE_MS, WakeupStore } from "./wakeups.ts";
@@ -174,6 +175,8 @@ interface TurnRequest {
   screen_previous?: ScreenPrevious;
   /** what the media players play now (Home Assistant; for voice devices): tells the TV from a person */
   media?: MediaNow[];
+  /** the Home Assistant user who sent it (typed or said in the Home Assistant app or a page); none from voice devices */
+  user?: { name?: string } | null;
 }
 
 interface Run {
@@ -1311,6 +1314,9 @@ ${text}`;
         prompt = `${interruptionNote(this.interruption)} ${prompt}`;
       }
       this.interruption = undefined;
+      // who is writing (or talking on their phone): the assistant can't tell that from the words
+      const user = req.user?.name?.trim();
+      if (user) prompt = `${userNote(user)} ${prompt}`;
       prompt = this.decorate(entry, prompt);
     }
     entry.started ??= Date.now();
